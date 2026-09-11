@@ -1,0 +1,12 @@
+{
+  "name": "JSAN PursuitNova",
+  "short_name": "PursuitNova",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f9fc",
+  "theme_color": "#0879b9",
+  "icons": [
+    {"src":"/icon-192.jpg","sizes":"192x192","type":"image/jpeg"},
+    {"src":"/icon-512.jpg","sizes":"512x512","type":"image/jpeg"}
+  ]
+}
