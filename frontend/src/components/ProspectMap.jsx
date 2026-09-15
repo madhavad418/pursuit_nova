@@ -52,7 +52,7 @@ export default function ProspectMap({locations=[],totalLeads=0}){
       center:[20,15],zoom:2,minZoom:2,maxZoom:6,
       zoomControl:false,attributionControl:false,
       scrollWheelZoom:true,dragging:true,
-      backgroundColor:'#012f62'
+      backgroundColor:'#0a1628'
     })
     mapInstance.current=map
 
