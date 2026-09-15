@@ -493,7 +493,7 @@ def init_db(seed_demo: bool | None = None, create_schema: bool = True):
     """Prepare the database. Reference data (roles, permissions, settings) is always ensured; demo content only on request."""
     if create_schema:
         metadata.create_all(engine)
-        _add_missing_columns()
+    _add_missing_columns()
     if seed_demo is None:
         production = os.getenv("APP_ENV", "development").lower() == "production"
         seed_demo = os.getenv("SEED_DEMO", "false" if production else "true").lower() == "true"
@@ -523,6 +523,9 @@ def _bootstrap_initial_admin():
 
 def _add_missing_columns():
     """create_all() never alters existing tables, so add columns introduced after a database was first created."""
+    # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
+    for tbl in (kpi_templates, kpi_targets, kpi_actuals):
+        tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE roles ADD COLUMN created_by INTEGER"))
