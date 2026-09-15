@@ -30,7 +30,7 @@
 /* Prospect Map */
 .pmap-wrap{position:relative;border-radius:16px;overflow:hidden;background:#0a1628;border:1px solid rgba(0,212,255,0.12)}
 .pmap-canvas{height:420px;width:100%;background:#0a1628}
-.pmap-canvas .leaflet-tile-pane{filter:brightness(0.22) contrast(1.6) saturate(0.15) sepia(1) hue-rotate(180deg)}
+.pmap-canvas .leaflet-tile-pane{filter:brightness(0.22) contrast(1.6) saturate(0.15) sepia(0.99) hue-rotate(180deg)}
 .pmap-canvas .leaflet-container{background:#0a1628!important}
 .pmap-dot{background:transparent!important;border:none!important}
 /* Top-left info overlay */
