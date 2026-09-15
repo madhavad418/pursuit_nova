@@ -1337,9 +1337,17 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
     elif followup=="today": common.append(leads.c.next_follow_up==t)
     elif followup=="week": common.append(and_(leads.c.next_follow_up>=t,leads.c.next_follow_up<=week))
     elif followup=="none": common.append(or_(leads.c.next_follow_up.is_(None),leads.c.next_follow_up==""))
-    # Filter options come from every visible lead, so the menus don't shrink as filters are applied
-    facet_rows=rows(select(leads.c.region,leads.c.owner_id,owner.c.name.label("owner_name")).select_from(joined).where(lead_visibility_condition(u)).distinct())
-    facets={"regions":sorted({r["region"] for r in facet_rows if r["region"]},key=str.lower),
+    elif followup: common.append(leads.c.next_follow_up==followup)  # an exact date picked from the column's values
+    # Filter options are the distinct values actually present in every visible lead, so menus don't shrink as filters apply
+    facet_rows=rows(select(leads.c.region,leads.c.owner_id,owner.c.name.label("owner_name"),leads.c.temperature,leads.c.status,leads.c.next_follow_up).select_from(joined).where(lead_visibility_condition(u)).distinct())
+    distinct=lambda k:{r[k] for r in facet_rows if r[k]}
+    temp_order={"Hot":0,"Warm":1,"Cold":2}
+    facets={"temperatures":sorted(distinct("temperature"),key=lambda v:(temp_order.get(v,9),v)),
+            "statuses":sorted(distinct("status"),key=str.lower),
+            "follow_ups":sorted(distinct("next_follow_up")),
+            "has_empty_follow_up":any(not r["next_follow_up"] for r in facet_rows),
+            "regions":sorted(distinct("region"),key=str.lower),
+            "has_empty_region":any(not r["region"] for r in facet_rows),
             "owners":sorted([{"id":oid,"name":n} for oid,n in {(r["owner_id"],r["owner_name"]) for r in facet_rows}],key=lambda x:(x["name"] or "").lower())}
     if common: base=base.where(*common)
     summary_stmt=select(leads.c.temperature,func.count(leads.c.id).label("count")).select_from(leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)).where(lead_visibility_condition(u),*common).group_by(leads.c.temperature)
