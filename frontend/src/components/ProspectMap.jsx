@@ -50,7 +50,7 @@ export default function ProspectMap({locations=[],totalLeads=0}){
     mapInstance.current=map
 
     // Dark tile layer
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_noannotation/{z}/{x}/{y}{r}.png',{
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
       subdomains:'abcd',maxZoom:19
     }).addTo(map)
 
