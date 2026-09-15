@@ -1,4 +1,4 @@
-import React,{useEffect,useRef} from 'react'
+import React,{useEffect,useMemo,useRef} from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { feature } from 'topojson-client'
@@ -32,16 +32,43 @@ const GEO={
 const CONTINENTS=[['NORTH AMERICA',[45,-102]],['SOUTH AMERICA',[-18,-60]],['EUROPE',[50,15]],['AFRICA',[5,20]],['ASIA',[48,90]],['AUSTRALIA',[-25,134]]]
 const HQ=[51.49,-0.31] // JSAN Global Headquarters, Brentford UK (same hub as the jsan.com contact map)
 
-function resolveCoords(country,region){
-  const find=v=>{if(!v)return null;const k=Object.keys(GEO).find(x=>x.toLowerCase()===String(v).trim().toLowerCase());return k?GEO[k]:null}
-  return find(country)||find(region)
+// Free-text country/city values -> Natural Earth country names used by world-atlas
+const ALIAS={'usa':'United States of America','us':'United States of America','united states':'United States of America','america':'United States of America',
+  'uk':'United Kingdom','england':'United Kingdom','scotland':'United Kingdom','wales':'United Kingdom','great britain':'United Kingdom','britain':'United Kingdom',
+  'uae':'United Arab Emirates','dubai':'United Arab Emirates','abu dhabi':'United Arab Emirates','czech republic':'Czechia','holland':'Netherlands',
+  'london':'United Kingdom','manchester':'United Kingdom','brentford':'United Kingdom','birmingham':'United Kingdom',
+  'bangalore':'India','bengaluru':'India','hyderabad':'India','mumbai':'India','delhi':'India','chennai':'India','pune':'India','south india':'India',
+  'riyadh':'Saudi Arabia','jeddah':'Saudi Arabia','bangkok':'Thailand','doha':'Qatar','sydney':'Australia','melbourne':'Australia','toronto':'Canada',
+  'new york':'United States of America','singapore':'Singapore','hong kong':'China'}
+const ATLAS_BY_LOWER=Object.fromEntries(LAND.features.map(f=>[String(f.properties?.name||'').toLowerCase(),f.properties?.name]))
+// Marker position for any atlas country: centre of its largest polygon's bounding box
+const CENTRE={}
+LAND.features.forEach(f=>{const g=f.geometry;if(!g)return;const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;let best=null,area=-1
+  polys.forEach(p=>{const xs=p[0].map(c=>c[0]),ys=p[0].map(c=>c[1]);const a=(Math.max(...xs)-Math.min(...xs))*(Math.max(...ys)-Math.min(...ys));if(a>area){area=a;best=[(Math.max(...ys)+Math.min(...ys))/2,(Math.max(...xs)+Math.min(...xs))/2]}})
+  if(best)CENTRE[f.properties.name]=best})
+const toAtlas=v=>{const k=String(v||'').trim().toLowerCase().replace(/\s+/g,' ');if(!k)return null;return ALIAS[k]||ATLAS_BY_LOWER[k]||null}
+
+// One location value can name several countries ("UK and Australia") or a city ("Manchester")
+function resolveCountries(country,region){
+  const parts=String(country||'').split(/\s+and\s+|[,/&|;]+/i).map(s=>s.trim()).filter(Boolean)
+  const found=[...new Set(parts.map(toAtlas).filter(Boolean))]
+  if(found.length) return found
+  const r=toAtlas(region)
+  return r?[r]:[]
+}
+function coordsFor(name){
+  const g=Object.keys(GEO).find(k=>toAtlas(k)===name)
+  return g?GEO[g]:CENTRE[name]||null
 }
 
-// Gently curved arc between two points, like the reference "delivery links"
+// Curved arc bowing towards the pole, like the great-circle "delivery links" in the reference
 function arc(a,b){
   const mid=[(a[0]+b[0])/2,(a[1]+b[1])/2]
-  const dx=b[1]-a[1],dy=b[0]-a[0]
-  const ctrl=[mid[0]+dx*0.18,mid[1]-dy*0.18]
+  const dLat=b[0]-a[0],dLng=b[1]-a[1]
+  let pLat=dLng,pLng=-dLat // perpendicular
+  if(pLat<0){pLat=-pLat;pLng=-pLng}
+  const k=0.2
+  const ctrl=[mid[0]+pLat*k,mid[1]+pLng*k]
   const pts=[]
   for(let t=0;t<=1.0001;t+=0.05){pts.push([(1-t)*(1-t)*a[0]+2*(1-t)*t*ctrl[0]+t*t*b[0],(1-t)*(1-t)*a[1]+2*(1-t)*t*ctrl[1]+t*t*b[1]])}
   return pts
@@ -57,6 +84,19 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
   const containerRef=useRef(null)
   const mapInstance=useRef(null)
 
+  // Merge location rows by resolved country
+  const byCountry=useMemo(()=>{
+    const out={}
+    for(const loc of locations){
+      for(const name of resolveCountries(loc.country,loc.region)){
+        const e=out[name]||(out[name]={country:name,leads:0,opportunities:0})
+        e.leads+=loc.leads||0; e.opportunities+=loc.opportunities||0
+      }
+    }
+    return out
+  },[locations])
+  const countryCount=Object.keys(byCountry).length
+
   useEffect(()=>{
     if(!containerRef.current) return
     if(mapInstance.current){mapInstance.current.remove();mapInstance.current=null}
@@ -69,14 +109,18 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     })
     mapInstance.current=map
 
-    L.geoJSON(LAND,{interactive:false,style:{fillColor:'#15477f',fillOpacity:1,color:'#5f8fc4',weight:0.6,opacity:0.45}}).addTo(map)
+    // Countries with prospects are filled blue; the rest stay dark with fine borders (as in the reference)
+    const active=new Set(Object.keys(byCountry))
+    L.geoJSON(LAND,{interactive:false,style:f=>active.has(f.properties?.name)
+      ?{fillColor:'#164a82',fillOpacity:1,color:'#4f7fb3',weight:0.6,opacity:0.7}
+      :{fillColor:'#062452',fillOpacity:1,color:'#8fb0d6',weight:0.5,opacity:0.32}}).addTo(map)
 
     CONTINENTS.forEach(([name,pos])=>L.marker(pos,{interactive:false,icon:L.divIcon({className:'pmap-continent',html:name.replace(' ','<br>'),iconSize:[120,40],iconAnchor:[60,20]})}).addTo(map))
 
     const points=[]
-    for(const loc of locations){
-      const c=resolveCoords(loc.country,loc.region)
-      if(c) points.push({...loc,lat:c[0],lng:c[1]})
+    for(const e of Object.values(byCountry)){
+      const c=coordsFor(e.country)
+      if(c) points.push({...e,lat:c[0],lng:c[1]})
     }
 
     points.forEach(p=>{
@@ -85,21 +129,21 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     })
 
     points.forEach(p=>{
-      const size=Math.min(16,11+Math.floor((p.leads||0)/2))
+      const size=13 // uniform markers, as in the reference
       L.marker([p.lat,p.lng],{icon:L.divIcon({className:'pmap-dot',html:dotHtml(size),iconSize:[size,size],iconAnchor:[size/2,size/2]})})
         .addTo(map)
         .bindTooltip(`<strong>${p.country}</strong><br/>${p.leads} prospect${p.leads!==1?'s':''} · ${p.opportunities} opportunit${p.opportunities!==1?'ies':'y'}`,{className:'pmap-tip',direction:'top',offset:[0,-8]})
     })
 
     if(points.length){
-      L.marker(HQ,{icon:L.divIcon({className:'pmap-dot',html:dotHtml(15),iconSize:[15,15],iconAnchor:[7.5,7.5]})})
+      L.marker(HQ,{icon:L.divIcon({className:'pmap-dot',html:dotHtml(13),iconSize:[13,13],iconAnchor:[6.5,6.5]})})
         .addTo(map).bindTooltip('<strong>JSAN Global HQ</strong><br/>Brentford, UK',{className:'pmap-tip',direction:'top',offset:[0,-8]})
       // Whole world by default (as in the reference); zoom to the prospects only when a region is filtered
       if(focus) map.fitBounds(L.latLngBounds(points.map(p=>[p.lat,p.lng])),{padding:[90,90],maxZoom:4})
     }
 
     return()=>{if(mapInstance.current){mapInstance.current.remove();mapInstance.current=null}}
-  },[locations,focus])
+  },[byCountry,focus])
 
   const reset=()=>{const m=mapInstance.current;if(m&&containerRef.current)m.setView(WORLD_CENTER,fitWidthZoom(containerRef.current))}
 
@@ -108,7 +152,7 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     <div className="pmap-info">
       <div className="pmap-info-label">Global Network</div>
       <div className="pmap-info-num">{totalLeads}<span>prospects</span></div>
-      <div className="pmap-info-sub">{locations.length} {locations.length===1?'country':'countries'}</div>
+      <div className="pmap-info-sub">{countryCount} {countryCount===1?'country':'countries'}</div>
     </div>
     <div className="pmap-controls">
       <button onClick={reset} title="Reset view" aria-label="Reset view">
