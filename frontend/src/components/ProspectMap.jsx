@@ -7,6 +7,9 @@ import world from 'world-atlas/countries-110m.json'
 // Country shapes are bundled so the map needs no external tile server (the app's CSP blocks those).
 const LAND=feature(world,world.objects.countries)
 LAND.features=LAND.features.filter(f=>f.id!=='010') // drop Antarctica
+// Rings that cross the date line (Russia, Fiji) otherwise draw a band across the whole map
+const unwrapRing=ring=>{if(ring.some(([x])=>x>150)&&ring.some(([x])=>x<-150))ring.forEach(p=>{if(p[0]<0)p[0]+=360})}
+LAND.features.forEach(f=>{const g=f.geometry;if(!g)return;const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;polys.forEach(poly=>poly.forEach(unwrapRing))})
 
 const GEO={
   'USA':[39.8,-98.6],'UK':[54.0,-2.0],'India':[20.6,79.0],'Germany':[51.2,10.4],'France':[46.6,2.2],
@@ -27,7 +30,7 @@ const GEO={
   'Middle East':[25.0,45.0],'Africa':[0.0,25.0],'Latin America':[-15.0,-60.0],
 }
 const CONTINENTS=[['NORTH AMERICA',[45,-102]],['SOUTH AMERICA',[-18,-60]],['EUROPE',[50,15]],['AFRICA',[5,20]],['ASIA',[48,90]],['AUSTRALIA',[-25,134]]]
-const HQ=[17.4,78.5] // JSAN HQ, Hyderabad
+const HQ=[51.49,-0.31] // JSAN Global Headquarters, Brentford UK (same hub as the jsan.com contact map)
 
 function resolveCoords(country,region){
   const find=v=>{if(!v)return null;const k=Object.keys(GEO).find(x=>x.toLowerCase()===String(v).trim().toLowerCase());return k?GEO[k]:null}
@@ -46,7 +49,11 @@ function arc(a,b){
 
 const dotHtml=size=>`<span class="pmap-marker" style="width:${size}px;height:${size}px"></span>`
 
-export default function ProspectMap({locations=[],totalLeads=0}){
+const WORLD_CENTER=[28,12]
+// Zoom at which one world copy exactly fills the panel width, like the reference map
+const fitWidthZoom=el=>Math.log2(Math.max(el.clientWidth,256)/256)
+
+export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
   const containerRef=useRef(null)
   const mapInstance=useRef(null)
 
@@ -54,10 +61,11 @@ export default function ProspectMap({locations=[],totalLeads=0}){
     if(!containerRef.current) return
     if(mapInstance.current){mapInstance.current.remove();mapInstance.current=null}
 
+    const worldZoom=fitWidthZoom(containerRef.current)
     const map=L.map(containerRef.current,{
-      center:[25,15],zoom:1.6,zoomSnap:0.1,minZoom:1.2,maxZoom:6,
-      zoomControl:false,attributionControl:false,worldCopyJump:true,
-      maxBounds:[[-70,-220],[85,220]],maxBoundsViscosity:0.8,
+      center:WORLD_CENTER,zoom:worldZoom,zoomSnap:0,minZoom:worldZoom,maxZoom:6,
+      zoomControl:false,attributionControl:false,
+      maxBounds:[[-62,-180],[84,190]],maxBoundsViscosity:1,
     })
     mapInstance.current=map
 
@@ -85,15 +93,15 @@ export default function ProspectMap({locations=[],totalLeads=0}){
 
     if(points.length){
       L.marker(HQ,{icon:L.divIcon({className:'pmap-dot',html:dotHtml(15),iconSize:[15,15],iconAnchor:[7.5,7.5]})})
-        .addTo(map).bindTooltip('<strong>JSAN HQ</strong><br/>Hyderabad',{className:'pmap-tip',direction:'top',offset:[0,-8]})
-      const bounds=L.latLngBounds([...points.map(p=>[p.lat,p.lng]),HQ])
-      map.fitBounds(bounds,{padding:[70,70],maxZoom:4})
+        .addTo(map).bindTooltip('<strong>JSAN Global HQ</strong><br/>Brentford, UK',{className:'pmap-tip',direction:'top',offset:[0,-8]})
+      // Whole world by default (as in the reference); zoom to the prospects only when a region is filtered
+      if(focus) map.fitBounds(L.latLngBounds(points.map(p=>[p.lat,p.lng])),{padding:[90,90],maxZoom:4})
     }
 
     return()=>{if(mapInstance.current){mapInstance.current.remove();mapInstance.current=null}}
-  },[locations])
+  },[locations,focus])
 
-  const reset=()=>mapInstance.current?.setView([25,15],1.6)
+  const reset=()=>{const m=mapInstance.current;if(m&&containerRef.current)m.setView(WORLD_CENTER,fitWidthZoom(containerRef.current))}
 
   return <div className="pmap-wrap">
     <div ref={containerRef} className="pmap-canvas"/>
