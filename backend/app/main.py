@@ -1171,7 +1171,20 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
         verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["won"]+=1
         owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0})["won"]+=value
-    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":sorted(sources.values(),key=lambda x:x["leads"],reverse=True),"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True)}
+    # Geographic aggregation for map
+    locations={}
+    for l in lp:
+        c=l.get("country") or l.get("region") or "Unknown"
+        if c and c!="Unknown":
+            locations.setdefault(c,{"country":c,"region":l.get("region",""),"leads":0,"opportunities":0,"pipeline":0})["leads"]+=1
+    for o in op:
+        ll=lmap.get(o["lead_id"],{})
+        c=ll.get("country") or ll.get("region") or o.get("vertical") or "Unknown"
+        if c and c!="Unknown":
+            locations.setdefault(c,{"country":c,"region":ll.get("region",""),"leads":0,"opportunities":0,"pipeline":0})
+            locations[c]["opportunities"]+=1
+            locations[c]["pipeline"]+=cv(o.get("amount"),o.get("currency"))
+    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":sorted(sources.values(),key=lambda x:x["leads"],reverse=True),"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True),"locations":sorted(locations.values(),key=lambda x:x["leads"],reverse=True)}
 
 @app.get("/api/admin/master-values")
 def get_masters(u=Depends(current_user)): return rows(select(master_values).where(master_values.c.active==True).order_by(master_values.c.category,master_values.c.sort_order))
