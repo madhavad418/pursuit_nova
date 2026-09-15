@@ -389,6 +389,24 @@ revoked_sessions = Table(
     Column("revoked_at", DateTime, server_default=func.current_timestamp()),
 )
 
+# Work items that are not tied to a prospect (PPT preparation, summit preparation, internal tasks)
+generic_actions = Table(
+    "generic_actions", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("title", String(255), nullable=False),
+    Column("action_type", String(60), nullable=False, default="Other"),
+    Column("description", Text),
+    Column("assigned_to", ForeignKey("users.id"), nullable=False),
+    Column("due_date", String(10), nullable=False),
+    Column("status", String(40), nullable=False, default="Open"),
+    Column("priority", String(20), nullable=False, default="Medium"),
+    Column("remarks", Text),
+    Column("completion_date", String(10)),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+
 kpi_templates = Table(
     "kpi_templates", metadata,
     Column("id", Integer, primary_key=True),
@@ -430,6 +448,7 @@ kpi_actuals = Table(
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
+Index("ix_generic_actions_assignee_due", generic_actions.c.assigned_to, generic_actions.c.due_date)
 Index("ix_opps_owner_status", opportunities.c.owner_id, opportunities.c.status)
 Index("ix_companies_norm", companies.c.normalized_name)
 Index("ix_companies_domain", companies.c.domain)
@@ -524,7 +543,7 @@ def _bootstrap_initial_admin():
 def _add_missing_columns():
     """create_all() never alters existing tables, so add columns introduced after a database was first created."""
     # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
-    for tbl in (kpi_templates, kpi_targets, kpi_actuals):
+    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
