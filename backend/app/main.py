@@ -156,6 +156,21 @@ def get_permissions(user_id: int) -> list[str]:
             .where(users.c.id == user_id))
     return [r["code"] for r in rows(stmt)]
 
+# KPI categories were renamed. Rows saved under the old names stay untouched in the database;
+# they are read as the new names, and everything written from now on uses the new names.
+KPI_CATEGORIES = ("Business Development Manager", "Business Development Lead", "Presales Lead")
+LEGACY_CATEGORY = {"Account Management": "Business Development Manager", "Business Development": "Business Development Lead", "Presales": "Presales Lead"}
+
+def canon_category(value):
+    if not value: return value
+    v = str(value).strip()
+    return LEGACY_CATEGORY.get(v, v)
+
+def category_names(value):
+    """Every stored spelling of a category: the current name plus any legacy name mapping to it."""
+    c = canon_category(value)
+    return [c] + [old for old, new in LEGACY_CATEGORY.items() if new == c]
+
 def _user_has_category():
     try:
         return "category" in {c["name"] for c in inspect(engine).get_columns("users")}
@@ -174,8 +189,7 @@ def safe_user(user_id: int):
     r = row(select(*cols).select_from(users.join(roles, users.c.role_id == roles.c.id)).where(users.c.id == user_id))
     if r:
         r["permissions"] = get_permissions(user_id)
-        if "category" not in r:
-            r["category"] = None
+        r["category"] = canon_category(r.get("category"))
     return r
 
 def current_user(request: Request):
@@ -467,7 +481,7 @@ def assignable(u=Depends(current_user)):
     cols=[users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,users.c.title,users.c.region]
     if _HAS_CATEGORY: cols.append(users.c.category)
     stmt=select(*cols).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(users.c.active==True,users.c.id.in_(sorted(ids)))).order_by(roles.c.rank,users.c.name)
-    return rows(stmt)
+    return [{**r,"category":canon_category(r.get("category"))} for r in rows(stmt)]
 
 @app.get("/api/users")
 def list_users(u=Depends(require_perm("USER_ADMIN"))):
@@ -475,7 +489,9 @@ def list_users(u=Depends(require_perm("USER_ADMIN"))):
     cols=[users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,m.c.name.label("manager_name"),users.c.title,users.c.region]
     if _HAS_CATEGORY: cols.append(users.c.category)
     cols+=[users.c.active,users.c.mfa_enabled,users.c.created_at]
-    return rows(select(*cols).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
+    out=rows(select(*cols).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
+    for r in out: r["category"]=canon_category(r.get("category"))
+    return out
 
 def managed_user_ids(u) -> set[int]:
     """Users an administrator may manage: everyone for organisation-wide roles, otherwise their own reporting tree."""
@@ -508,7 +524,7 @@ def create_user(p:Payload,u=Depends(require_csrf)):
     ensure_manager_in_hierarchy(u,manager_id)
     validate_manager_assignment(None,manager_id)
     uvals=dict(name=d["name"],email=d["email"].lower(),password_hash=hash_password(d["password"]),role_id=rr["id"],manager_id=manager_id,title=d.get("title"),region=d.get("region"),active=True)
-    if _HAS_CATEGORY and d.get("category"): uvals["category"]=d["category"]
+    if _HAS_CATEGORY and d.get("category"): uvals["category"]=canon_category(d["category"])
     try: uid=execute(insert(users).values(**uvals))
     except IntegrityError: raise HTTPException(400,"Email already exists")
     audit(u["id"],"user",uid,"CREATE",{"name":d["name"],"role":d["role"]}); return safe_user(uid)
@@ -521,6 +537,7 @@ def update_user(user_id:int,p:Payload,u=Depends(require_csrf)):
     for k in (("name","email","manager_id","title","region","category","active") if _HAS_CATEGORY else ("name","email","manager_id","title","region","active")):
         if k in d: vals[k]=d[k] if d[k]!="" else None
     if "email" in vals and vals["email"]: vals["email"]=vals["email"].strip().lower()
+    if vals.get("category"): vals["category"]=canon_category(vals["category"])
     if d.get("role"):
         rr=row(select(roles).where(roles.c.name==d["role"]))
         if not rr: raise HTTPException(400,"Invalid role")
@@ -1481,15 +1498,15 @@ def export_opportunities(u=Depends(require_perm("DATA_EXPORT"))):
 @app.get("/api/kpi/templates")
 def kpi_template_list(category:str=Query(default=""),u=Depends(current_user)):
     stmt=select(kpi_templates).where(kpi_templates.c.active==True).order_by(kpi_templates.c.category,kpi_templates.c.sort_order)
-    if category: stmt=stmt.where(kpi_templates.c.category==category)
-    return rows(stmt)
+    if category: stmt=stmt.where(kpi_templates.c.category.in_(category_names(category)))
+    return [{**t,"category":canon_category(t["category"])} for t in rows(stmt)]
 
 @app.get("/api/kpi/targets")
 def kpi_target_list(category:str=Query(default=""),month:str=Query(default=""),u=Depends(current_user)):
     stmt=select(kpi_targets,kpi_templates.c.category,kpi_templates.c.kra,kpi_templates.c.kpi,kpi_templates.c.sort_order).select_from(kpi_targets.join(kpi_templates,kpi_templates.c.id==kpi_targets.c.template_id)).order_by(kpi_templates.c.category,kpi_templates.c.sort_order)
-    if category: stmt=stmt.where(kpi_templates.c.category==category)
+    if category: stmt=stmt.where(kpi_templates.c.category.in_(category_names(category)))
     if month: stmt=stmt.where(kpi_targets.c.month==month)
-    return rows(stmt)
+    return [{**t,"category":canon_category(t["category"])} for t in rows(stmt)]
 
 @app.put("/api/kpi/targets")
 def kpi_target_upsert(p:Payload,u=Depends(require_csrf)):
@@ -1507,7 +1524,8 @@ def kpi_my_actuals(month:str=Query(default=""),u=Depends(current_user)):
     """Return the current user's KPI sheet: templates + targets + actuals for their category."""
     cat=u.get("category")
     if not cat: return {"category":None,"items":[]}
-    tpls=rows(select(kpi_templates).where(and_(kpi_templates.c.category==cat,kpi_templates.c.active==True)).order_by(kpi_templates.c.sort_order))
+    cat=canon_category(cat)
+    tpls=[{**t,"category":cat} for t in rows(select(kpi_templates).where(and_(kpi_templates.c.category.in_(category_names(cat)),kpi_templates.c.active==True)).order_by(kpi_templates.c.sort_order))]
     if not month: month=date.today().strftime("%Y-%m")
     tgt_map={}
     for t in rows(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_([x["id"] for x in tpls]),kpi_targets.c.month==month))):
@@ -1541,7 +1559,7 @@ def kpi_submit_month(p:Payload,u=Depends(require_csrf)):
     month=p.data.get("month") or date.today().strftime("%Y-%m")
     cat=u.get("category")
     if not cat: raise HTTPException(400,"No category assigned to your profile")
-    tpl_ids=[t["id"] for t in rows(select(kpi_templates.c.id).where(kpi_templates.c.category==cat))]
+    tpl_ids=[t["id"] for t in rows(select(kpi_templates.c.id).where(kpi_templates.c.category.in_(category_names(cat))))]
     execute(update(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id.in_(tpl_ids),kpi_actuals.c.month==month,kpi_actuals.c.status=="draft")).values(status="submitted",updated_at=utcnow()))
     return {"ok":True}
 
@@ -1554,6 +1572,7 @@ def kpi_review_list(month:str=Query(default=""),user_id:int=Query(default=0),u=D
     stmt=select(kpi_actuals,kpi_templates.c.category,kpi_templates.c.kra,kpi_templates.c.kpi,kpi_templates.c.sort_order,uu.c.name.label("user_name"),uu.c.category.label("user_category")).select_from(kpi_actuals.join(kpi_templates,kpi_templates.c.id==kpi_actuals.c.template_id).join(uu,uu.c.id==kpi_actuals.c.user_id)).where(and_(kpi_actuals.c.month==month,kpi_actuals.c.status.in_(["submitted","approved","rejected"]))).order_by(uu.c.name,kpi_templates.c.sort_order)
     if user_id: stmt=stmt.where(kpi_actuals.c.user_id==user_id)
     items=rows(stmt)
+    for i in items: i["category"]=canon_category(i["category"]); i["user_category"]=canon_category(i["user_category"])
     # Also fetch targets for these templates
     tpl_ids=list({i["template_id"] for i in items})
     tgt_map={}
@@ -1585,7 +1604,7 @@ def kpi_users_with_category(u=Depends(current_user)):
     """List users that have a category assigned (for admin review dropdown)."""
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
     if not _HAS_CATEGORY: return []
-    return rows(select(users.c.id,users.c.name,users.c.category).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name))
+    return [{**r,"category":canon_category(r["category"])} for r in rows(select(users.c.id,users.c.name,users.c.category).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name))]
 
 @app.post("/api/kpi/templates")
 def kpi_template_create(p:Payload,u=Depends(require_csrf)):
@@ -1593,9 +1612,10 @@ def kpi_template_create(p:Payload,u=Depends(require_csrf)):
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only admins can create KPI templates")
     d=p.data
     if not d.get("category") or not d.get("kra") or not d.get("kpi"): raise HTTPException(400,"Category, KRA and KPI are required")
-    max_sort=row(select(func.max(kpi_templates.c.sort_order).label("mx")).where(kpi_templates.c.category==d["category"]))
+    cat=canon_category(d["category"])
+    max_sort=row(select(func.max(kpi_templates.c.sort_order).label("mx")).where(kpi_templates.c.category.in_(category_names(cat))))
     sort_order=(max_sort["mx"] or 0)+1 if max_sort else 1
-    tid=execute(insert(kpi_templates).values(category=d["category"],kra=d["kra"],kpi=d["kpi"],sort_order=sort_order,active=True))
+    tid=execute(insert(kpi_templates).values(category=cat,kra=d["kra"],kpi=d["kpi"],sort_order=sort_order,active=True))
     if d.get("month") and d.get("target_value") is not None:
         execute(insert(kpi_targets).values(template_id=tid,month=d["month"],target_value=float(d["target_value"]),created_by=u["id"]))
     return {"ok":True,"id":tid}
@@ -1606,7 +1626,7 @@ def kpi_template_update(template_id:int,p:Payload,u=Depends(require_csrf)):
     d=p.data; vals={}
     if d.get("kra"): vals["kra"]=d["kra"]
     if d.get("kpi"): vals["kpi"]=d["kpi"]
-    if d.get("category"): vals["category"]=d["category"]
+    if d.get("category"): vals["category"]=canon_category(d["category"])
     if not vals: raise HTTPException(400,"Nothing to update")
     execute(update(kpi_templates).where(kpi_templates.c.id==template_id).values(**vals))
     return {"ok":True}
@@ -1625,8 +1645,8 @@ def kpi_admin_sheet(category:str=Query(default=""),month:str=Query(default=""),u
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
     if not month: month=date.today().strftime("%Y-%m")
     stmt=select(kpi_templates).where(kpi_templates.c.active==True).order_by(kpi_templates.c.sort_order)
-    if category: stmt=stmt.where(kpi_templates.c.category==category)
-    tpls=rows(stmt)
+    if category: stmt=stmt.where(kpi_templates.c.category.in_(category_names(category)))
+    tpls=[{**t,"category":canon_category(t["category"])} for t in rows(stmt)]
     tpl_ids=[t["id"] for t in tpls]
     tgt_map={}
     if tpl_ids:

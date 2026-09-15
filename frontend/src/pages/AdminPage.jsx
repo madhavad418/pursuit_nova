@@ -15,7 +15,10 @@ function MultiRegionSelect({value,onChange}){
  const remove=r=>{const next=selected.filter(x=>x!==r);onChange(next.join(', '))}
  return <div className="multi-region-wrap"><div className="multi-region-tags">{selected.map(r=><span key={r} className="region-tag">{r}<button type="button" onClick={()=>remove(r)}>&times;</button></span>)}<input value={q} placeholder={selected.length?'Add more...':'Type to search...'} onChange={e=>{setQ(e.target.value);setOpen(true)}} onFocus={()=>setOpen(true)} onBlur={()=>setTimeout(()=>setOpen(false),150)} className="region-tag-input"/></div>{open&&filtered.length>0&&<div className="region-dropdown">{filtered.map(r=><button type="button" key={r} onMouseDown={e=>{e.preventDefault();add(r)}}>{r}</button>)}</div>}</div>
 }
-const CATEGORIES=['Business Development','Presales','Account Management']
+const CATEGORIES=['Business Development Manager','Business Development Lead','Presales Lead']
+// Users saved before the rename may still carry an old name until they are edited
+const LEGACY_CATEGORY={'Account Management':'Business Development Manager','Business Development':'Business Development Lead','Presales':'Presales Lead'}
+const canonCategory=c=>LEGACY_CATEGORY[c]||c
 const NEW_USER={name:'',email:'',password:'',role:'',manager_id:'',title:'',region:'',category:''}
 const NEW_ROLE={name:'',scope_type:'team',rank:'',permissions:[]}
 // Everything a typical BD lead needs to work their prospects and pipeline; new roles start from this.
@@ -36,7 +39,7 @@ export default function AdminPage({onToast}){
  const setU=(k,v)=>setUserForm(f=>({...f,[k]:v})); const setR=(k,v)=>setRoleForm(f=>({...f,[k]:v}))
 
  const openNewUser=()=>{setUserForm({...NEW_USER,role:assignable[0]?.name||'',manager_id:user.id});setUserModal('create')}
- const openEditUser=r=>{setUserForm({id:r.id,name:r.name,email:r.email||'',role:r.role,manager_id:r.manager_id||'',title:r.title||'',region:r.region||'',category:r.category||'',active:r.active,password:''});setUserModal('edit')}
+ const openEditUser=r=>{setUserForm({id:r.id,name:r.name,email:r.email||'',role:r.role,manager_id:r.manager_id||'',title:r.title||'',region:r.region||'',category:canonCategory(r.category||''),active:r.active,password:''});setUserModal('edit')}
  const saveUser=async e=>{e.preventDefault();const {id,...f}=userForm;const manager_id=f.manager_id?Number(f.manager_id):null
   try{
    if(userModal==='create'){await api.post('/api/users',{...f,manager_id});onToast?.({message:`${f.name} added`})}
@@ -58,13 +61,13 @@ export default function AdminPage({onToast}){
   try{if(roleModal==='create')await api.post('/api/admin/roles',payload);else await api.put(`/api/admin/roles/${id}`,payload);onToast?.({message:`Role ${f.name} saved`});setRoleModal(null);load()}catch(err){fail(err)}}
  const deleteRole=async r=>{if(!window.confirm(`Delete the ${r.name} role?`))return;try{await api.delete(`/api/admin/roles/${r.id}`);onToast?.({message:`Role ${r.name} deleted`});load()}catch(err){fail(err)}}
 
- const catTone=c=>c==='Business Development'?'info':c==='Presales'?'warning':c==='Account Management'?'success':'neutral'
+ const catTone=c=>({'Business Development Manager':'success','Business Development Lead':'info','Presales Lead':'warning'}[canonCategory(c)]||'neutral')
  const deactivateUser=async r=>{
   const action=r.active?'Deactivate':'Activate'
   if(!window.confirm(`${action} user "${r.name}"?`))return
   try{await api.put(`/api/users/${r.id}`,{active:!r.active});onToast?.({message:`${r.name} ${r.active?'deactivated':'activated'}`});load()}catch(err){fail(err)}
  }
- const userCols=[{key:'name',label:'User',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.email}</span></div>},{key:'role',label:'Role'},{key:'category',label:'Category',render:r=>r.category?<Pill tone={catTone(r.category)}>{r.category}</Pill>:<span style={{color:'var(--muted)'}}>—</span>},{key:'title',label:'Title'},{key:'manager_name',label:'Reporting manager',render:r=>r.manager_name||'—'},{key:'region',label:'Region'},{key:'active',label:'Status',render:r=><Pill tone={r.active?'success':'neutral'}>{r.active?'Active':'Inactive'}</Pill>},{key:'actions',label:'',render:r=>(isSuper||r.id!==user.id)?<div className="row-actions"><button className="icon-btn" title="Edit" onClick={()=>openEditUser(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title={r.active?'Deactivate':'Activate'} onClick={()=>deactivateUser(r)}><Icon name={r.active?'trash':'check'} size={16}/></button></div>:null}]
+ const userCols=[{key:'name',label:'User',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.email}</span></div>},{key:'role',label:'Role'},{key:'category',label:'Category',render:r=>r.category?<Pill tone={catTone(r.category)}>{canonCategory(r.category)}</Pill>:<span style={{color:'var(--muted)'}}>—</span>},{key:'title',label:'Title'},{key:'manager_name',label:'Reporting manager',render:r=>r.manager_name||'—'},{key:'region',label:'Region'},{key:'active',label:'Status',render:r=><Pill tone={r.active?'success':'neutral'}>{r.active?'Active':'Inactive'}</Pill>},{key:'actions',label:'',render:r=>(isSuper||r.id!==user.id)?<div className="row-actions"><button className="icon-btn" title="Edit" onClick={()=>openEditUser(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title={r.active?'Deactivate':'Activate'} onClick={()=>deactivateUser(r)}><Icon name={r.active?'trash':'check'} size={16}/></button></div>:null}]
  const roleCols=[{key:'name',label:'Role',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.user_count} {r.user_count===1?'user':'users'}{r.created_by==null?' · shared':''}</span></div>},{key:'scope_type',label:'Can see',render:r=>SCOPES[r.scope_type]||r.scope_type},{key:'rank',label:'Level',align:'right'},{key:'permissions',label:'Permissions',align:'right',render:r=>r.permissions.length},{key:'actions',label:'',render:r=>r.editable?<div style={{display:'flex',gap:4,justifyContent:'flex-end'}}><Button variant="text" onClick={()=>openEditRole(r)}>Edit</Button><Button variant="text" onClick={()=>deleteRole(r)} disabled={r.user_count>0} title={r.user_count>0?'Move its users to another role first':''}>Delete</Button></div>:<Pill>Protected</Pill>}]
  const editedUser=users.find(x=>x.id===userForm.id)
  const roleOptions=editedUser&&!assignable.some(r=>r.name===editedUser.role)?[{name:editedUser.role,locked:true},...assignable]:assignable

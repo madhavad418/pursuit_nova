@@ -753,49 +753,49 @@ def _seed_kpi_templates():
         BD_KRA3 = "Proposal, Negotiation/ Partnership and Deal Closure"
         BD_KRA4 = "Brand, Positioning and Business Promotions"
         tpls = [
-            # Business Development (Excel Section 1 — Saumya)
-            ("Business Development", BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
-            ("Business Development", BD_KRA1, "Identify prospects; email campaign", 2),
-            ("Business Development", BD_KRA2, "Qualified sales opportunities created", 3),
-            ("Business Development", BD_KRA2, "Lead to deal conversion", 4),
-            ("Business Development", BD_KRA3, "Proposal to closure conversion rate", 5),
-            ("Business Development", BD_KRA3, "No of New Strategic Partnership Signed", 6),
-            ("Business Development", BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
-            ("Business Development", BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
-            ("Business Development", BD_KRA4, "Lead generated from Branding activities through participation, LinkedIn and Websites", 9),
-            ("Business Development", BD_KRA4, "Weekly 01 Post on LinkedIn", 10),
-            ("Business Development", BD_KRA4, "15 days 01 Blog on LinkedIn", 11),
-            # Presales (Excel Section 3 — Gangadhara)
-            ("Presales", BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
-            ("Presales", BD_KRA1, "Identify prospects; email campaign", 2),
-            ("Presales", BD_KRA2, "Qualified sales opportunities created", 3),
-            ("Presales", BD_KRA2, "Lead to deal conversion", 4),
-            ("Presales", BD_KRA3, "Proposal to closure conversion rate", 5),
-            ("Presales", BD_KRA3, "No of New Strategic Partnership Signed", 6),
-            ("Presales", BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
-            ("Presales", BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
-            ("Presales", BD_KRA4, "Weekly 01 Post on LinkedIn", 9),
-            ("Presales", BD_KRA4, "15 days 01 Blog on LinkedIn", 10),
-            # Account Management (Excel Section 2 — middle column)
-            ("Account Management", "Market Research & Analysis", "New opportunities, newsletters, trends, updates", 1),
-            ("Account Management", "Market Research & Analysis", "Identify prospects; email campaign", 2),
-            ("Account Management", "Sales Pipeline Management", "Qualified sales opportunities created", 3),
-            ("Account Management", "Sales Pipeline Management", "Lead to deal conversion", 4),
-            ("Account Management", "Proposal, Negotiation & Closure", "Proposal to closure conversion rate", 5),
-            ("Account Management", "Proposal, Negotiation & Closure", "New strategic partnerships signed", 6),
-            ("Account Management", "Proposal, Negotiation & Closure", "RFP/RFQ opportunities identified/participated", 7),
-            ("Account Management", "Branding & Positioning", "Industry events/forums/webinars participation", 8),
-            ("Account Management", "Branding & Positioning", "Leads generated via branding (LinkedIn, website)", 9),
-            ("Account Management", "Branding & Positioning", "Weekly LinkedIn post", 10),
-            ("Account Management", "Branding & Positioning", "Bi-monthly LinkedIn blog", 11),
-            ("Account Management", "Client Relationship Management", "Client satisfaction score (CSAT \u226580%)", 12),
-            ("Account Management", "Client Relationship Management", "Quarterly client review meetings", 13),
-            ("Account Management", "Revenue & Growth", "Quarterly revenue achievement", 14),
-            ("Account Management", "Revenue & Growth", "Upsell/cross-sell deals closed", 15),
-            ("Account Management", "Innovation & Collaboration", "New service ideas proposed", 16),
-            ("Account Management", "Innovation & Collaboration", "Joint initiatives with delivery/quality teams", 17),
-            ("Account Management", "Governance & Reporting", "Weekly pipeline reports submitted", 18),
-            ("Account Management", "Governance & Reporting", "Monthly BD dashboard updates", 19),
+            # Business Development Lead (Excel Section 1 — Saumya)
+            ("Business Development Lead",BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
+            ("Business Development Lead",BD_KRA1, "Identify prospects; email campaign", 2),
+            ("Business Development Lead",BD_KRA2, "Qualified sales opportunities created", 3),
+            ("Business Development Lead",BD_KRA2, "Lead to deal conversion", 4),
+            ("Business Development Lead",BD_KRA3, "Proposal to closure conversion rate", 5),
+            ("Business Development Lead",BD_KRA3, "No of New Strategic Partnership Signed", 6),
+            ("Business Development Lead",BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
+            ("Business Development Lead",BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
+            ("Business Development Lead",BD_KRA4, "Lead generated from Branding activities through participation, LinkedIn and Websites", 9),
+            ("Business Development Lead",BD_KRA4, "Weekly 01 Post on LinkedIn", 10),
+            ("Business Development Lead",BD_KRA4, "15 days 01 Blog on LinkedIn", 11),
+            # Presales Lead (Excel Section 3 — Gangadhara)
+            ("Presales Lead",BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
+            ("Presales Lead",BD_KRA1, "Identify prospects; email campaign", 2),
+            ("Presales Lead",BD_KRA2, "Qualified sales opportunities created", 3),
+            ("Presales Lead",BD_KRA2, "Lead to deal conversion", 4),
+            ("Presales Lead",BD_KRA3, "Proposal to closure conversion rate", 5),
+            ("Presales Lead",BD_KRA3, "No of New Strategic Partnership Signed", 6),
+            ("Presales Lead",BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
+            ("Presales Lead",BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
+            ("Presales Lead",BD_KRA4, "Weekly 01 Post on LinkedIn", 9),
+            ("Presales Lead",BD_KRA4, "15 days 01 Blog on LinkedIn", 10),
+            # Business Development Manager (Excel Section 2 — middle column)
+            ("Business Development Manager","Market Research & Analysis", "New opportunities, newsletters, trends, updates", 1),
+            ("Business Development Manager","Market Research & Analysis", "Identify prospects; email campaign", 2),
+            ("Business Development Manager","Sales Pipeline Management", "Qualified sales opportunities created", 3),
+            ("Business Development Manager","Sales Pipeline Management", "Lead to deal conversion", 4),
+            ("Business Development Manager","Proposal, Negotiation & Closure", "Proposal to closure conversion rate", 5),
+            ("Business Development Manager","Proposal, Negotiation & Closure", "New strategic partnerships signed", 6),
+            ("Business Development Manager","Proposal, Negotiation & Closure", "RFP/RFQ opportunities identified/participated", 7),
+            ("Business Development Manager","Branding & Positioning", "Industry events/forums/webinars participation", 8),
+            ("Business Development Manager","Branding & Positioning", "Leads generated via branding (LinkedIn, website)", 9),
+            ("Business Development Manager","Branding & Positioning", "Weekly LinkedIn post", 10),
+            ("Business Development Manager","Branding & Positioning", "Bi-monthly LinkedIn blog", 11),
+            ("Business Development Manager","Client Relationship Management", "Client satisfaction score (CSAT \u226580%)", 12),
+            ("Business Development Manager","Client Relationship Management", "Quarterly client review meetings", 13),
+            ("Business Development Manager","Revenue & Growth", "Quarterly revenue achievement", 14),
+            ("Business Development Manager","Revenue & Growth", "Upsell/cross-sell deals closed", 15),
+            ("Business Development Manager","Innovation & Collaboration", "New service ideas proposed", 16),
+            ("Business Development Manager","Innovation & Collaboration", "Joint initiatives with delivery/quality teams", 17),
+            ("Business Development Manager","Governance & Reporting", "Weekly pipeline reports submitted", 18),
+            ("Business Development Manager","Governance & Reporting", "Monthly BD dashboard updates", 19),
         ]
         c.execute(insert(kpi_templates), [{"category": cat, "kra": kra, "kpi": kpi, "sort_order": so, "active": True} for cat, kra, kpi, so in tpls])
 
@@ -851,7 +851,7 @@ def _seed_kpi_templates():
         }
         months = ["2026-09", "2026-10", "2026-11"]
         target_rows = []
-        for cat, tgt_map in [("Business Development", bd_targets), ("Presales", presales_targets), ("Account Management", am_targets)]:
+        for cat, tgt_map in [("Business Development Lead",bd_targets), ("Presales Lead",presales_targets), ("Business Development Manager",am_targets)]:
             for kpi_name, vals in tgt_map.items():
                 tid = tpl_map.get((cat, kpi_name))
                 if tid:

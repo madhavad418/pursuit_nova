@@ -4,7 +4,7 @@ import { useAuth } from '../components/Auth'
 import { Button,Empty,ErrorBanner,Field,Input,Modal,Pill,SectionHeader,Select,Textarea } from '../components/UI'
 import { Icon } from '../components/Icons'
 
-const CATEGORIES=['Business Development','Presales','Account Management']
+const CATEGORIES=['Business Development Manager','Business Development Lead','Presales Lead']
 const monthLabel=m=>{const [y,mo]=m.split('-');return new Date(Number(y),Number(mo)-1).toLocaleString('default',{month:'long',year:'numeric'})}
 function MonthPicker({value,onChange}){return <input type="month" className="month-picker" value={value} onChange={e=>onChange(e.target.value)}/>}
 const statusPill=s=>{const map={draft:['neutral','Draft'],submitted:['warning','Submitted'],approved:['success','Approved'],rejected:['danger','Rejected']};const [tone,label]=map[s]||['neutral',s];return <Pill tone={tone}>{label}</Pill>}
@@ -159,7 +159,7 @@ function AdminKPIView({onToast}){
      <td className="kpi-name">{item.kpi}</td>
      <td className="ctr">{item.target_value||<span className="text-muted">—</span>}</td>
      <td className="ctr">{item.actuals.length>0?<div className="kpi-actuals-list">{item.actuals.map(a=><span key={a.user_id} className="kpi-actual-chip"><strong>{a.actual_value}</strong><small>{a.user_name}</small>{statusPill(a.status)}</span>)}</div>:<span className="text-muted">—</span>}</td>
-     <td className="ctr" style={{whiteSpace:'nowrap'}}><button className="icon-btn" title="Edit" onClick={()=>openEditItem(item)}><Icon name="edit" size={15}/></button><button className="icon-btn text-danger" title="Delete" onClick={()=>deleteTemplate(item)}><Icon name="trash" size={15}/></button></td>
+     <td className="ctr"><div className="row-actions center"><button className="icon-btn" title="Edit" aria-label="Edit KPI" onClick={()=>openEditItem(item)}><Icon name="edit" size={15}/></button><button className="icon-btn text-danger" title="Delete" aria-label="Delete KPI" onClick={()=>deleteTemplate(item)}><Icon name="trash" size={15}/></button></div></td>
     </tr>)}
    </tbody></table>
   </section>)}
