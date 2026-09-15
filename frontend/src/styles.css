@@ -54,9 +54,7 @@
 .pmap-tip strong{color:#00d4ff}
 .pmap-tip.leaflet-tooltip-top::before{border-top-color:rgba(1,47,98,.95)!important}
 /* Generic actions */
-.section-actions .segmented{margin-bottom:0;flex:none}
-.segmented button,.section-actions .btn,.section-actions select{white-space:nowrap}
-.section-actions{flex-wrap:wrap;justify-content:flex-end}
+.section-actions .segmented{margin-bottom:0}
 .generic-type{display:inline-block;padding:1px 6px;border-radius:5px;background:#eaf5fa;color:var(--brand)!important;font-weight:700}
 .generic-detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}
 .generic-detail-grid>div,.generic-detail p{display:grid;gap:3px;margin:0}
