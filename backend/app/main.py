@@ -110,6 +110,12 @@ async def request_observability(request:Request, call_next):
     response.headers.setdefault("Permissions-Policy","camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("Content-Security-Policy","default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
     if COOKIE_SECURE: response.headers.setdefault("Strict-Transport-Security","max-age=31536000; includeSubDomains")
+    # Caching: hashed build files never change, but the page that references them must be rechecked on every
+    # load, otherwise a browser keeps an old index.html pointing at files a newer deploy removed (blank page).
+    path=request.url.path
+    if path.startswith("/api/"): response.headers.setdefault("Cache-Control","no-store")
+    elif path.startswith("/assets/") and response.status_code==200: response.headers.setdefault("Cache-Control","public, max-age=31536000, immutable")
+    elif response.headers.get("content-type","").startswith("text/html") or path in ("/","/index.html","/sw.js","/manifest.webmanifest"): response.headers.setdefault("Cache-Control","no-cache")
     json_log("request",request_id=rid,path=request.url.path,method=request.method,status=response.status_code,latency_ms=round(elapsed,2))
     return response
 
