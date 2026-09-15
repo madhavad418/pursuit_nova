@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, insert, update, delete, func, and_, or_, text
+from sqlalchemy import select, insert, update, delete, func, and_, or_, text, inspect
 from sqlalchemy.exc import IntegrityError
 
 # Optional OpenTelemetry export. Set OTEL_EXPORTER_OTLP_ENDPOINT in production.
@@ -76,6 +76,8 @@ async def lifespan(app):
         if MICROSOFT_CLIENT_ID and not INTEGRATION_ENCRYPTION_KEY: raise RuntimeError("Production Microsoft integration requires INTEGRATION_ENCRYPTION_KEY")
     # With AUTO_CREATE_SCHEMA=false Alembic owns the schema (see Dockerfile); reference data is still ensured on every start.
     init_db(create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower() == "true")
+    global _HAS_CATEGORY
+    _HAS_CATEGORY = _user_has_category()
     yield
 
 app = FastAPI(title=f"{APP_NAME} API", version=APP_VERSION, lifespan=lifespan)
@@ -154,12 +156,26 @@ def get_permissions(user_id: int) -> list[str]:
             .where(users.c.id == user_id))
     return [r["code"] for r in rows(stmt)]
 
+def _user_has_category():
+    try:
+        return "category" in {c["name"] for c in inspect(engine).get_columns("users")}
+    except Exception:
+        return False
+
+_HAS_CATEGORY = None
 def safe_user(user_id: int):
-    r = row(select(users.c.id, users.c.name, users.c.email, users.c.manager_id, users.c.title, users.c.region, users.c.category,
-                   users.c.active, users.c.mfa_enabled, roles.c.name.label("role"), roles.c.scope_type, roles.c.rank)
-            .select_from(users.join(roles, users.c.role_id == roles.c.id)).where(users.c.id == user_id))
+    global _HAS_CATEGORY
+    if _HAS_CATEGORY is None:
+        _HAS_CATEGORY = _user_has_category()
+    cols = [users.c.id, users.c.name, users.c.email, users.c.manager_id, users.c.title, users.c.region,
+            users.c.active, users.c.mfa_enabled, roles.c.name.label("role"), roles.c.scope_type, roles.c.rank]
+    if _HAS_CATEGORY:
+        cols.insert(6, users.c.category)
+    r = row(select(*cols).select_from(users.join(roles, users.c.role_id == roles.c.id)).where(users.c.id == user_id))
     if r:
         r["permissions"] = get_permissions(user_id)
+        if "category" not in r:
+            r["category"] = None
     return r
 
 def current_user(request: Request):
@@ -448,13 +464,18 @@ def mfa_enable(p:Payload,u=Depends(require_csrf)):
 def assignable(u=Depends(current_user)):
     ids=set(scope_user_ids(u)); root=None if is_super(u) else org_root(u["id"])
     ids.update(r["id"] for r in rows(select(users.c.id).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(roles.c.name=="Presales Lead",users.c.active==True))) if root is None or org_root(r["id"])==root)
-    stmt=select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,users.c.title,users.c.region,users.c.category).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(users.c.active==True,users.c.id.in_(sorted(ids)))).order_by(roles.c.rank,users.c.name)
+    cols=[users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,users.c.title,users.c.region]
+    if _HAS_CATEGORY: cols.append(users.c.category)
+    stmt=select(*cols).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(users.c.active==True,users.c.id.in_(sorted(ids)))).order_by(roles.c.rank,users.c.name)
     return rows(stmt)
 
 @app.get("/api/users")
 def list_users(u=Depends(require_perm("USER_ADMIN"))):
     m=users.alias("m")
-    return rows(select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,m.c.name.label("manager_name"),users.c.title,users.c.region,users.c.category,users.c.active,users.c.mfa_enabled,users.c.created_at).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
+    cols=[users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,m.c.name.label("manager_name"),users.c.title,users.c.region]
+    if _HAS_CATEGORY: cols.append(users.c.category)
+    cols+=[users.c.active,users.c.mfa_enabled,users.c.created_at]
+    return rows(select(*cols).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
 
 def managed_user_ids(u) -> set[int]:
     """Users an administrator may manage: everyone for organisation-wide roles, otherwise their own reporting tree."""
@@ -486,7 +507,9 @@ def create_user(p:Payload,u=Depends(require_csrf)):
     manager_id=int(d["manager_id"]) if d.get("manager_id") else (None if is_super(u) else u["id"])
     ensure_manager_in_hierarchy(u,manager_id)
     validate_manager_assignment(None,manager_id)
-    try: uid=execute(insert(users).values(name=d["name"],email=d["email"].lower(),password_hash=hash_password(d["password"]),role_id=rr["id"],manager_id=manager_id,title=d.get("title"),region=d.get("region"),category=d.get("category"),active=True))
+    uvals=dict(name=d["name"],email=d["email"].lower(),password_hash=hash_password(d["password"]),role_id=rr["id"],manager_id=manager_id,title=d.get("title"),region=d.get("region"),active=True)
+    if _HAS_CATEGORY and d.get("category"): uvals["category"]=d["category"]
+    try: uid=execute(insert(users).values(**uvals))
     except IntegrityError: raise HTTPException(400,"Email already exists")
     audit(u["id"],"user",uid,"CREATE",{"name":d["name"],"role":d["role"]}); return safe_user(uid)
 
@@ -495,7 +518,7 @@ def update_user(user_id:int,p:Payload,u=Depends(require_csrf)):
     if "USER_ADMIN" not in u["permissions"]: raise HTTPException(403,"User administration permission required")
     if not is_super(u) and user_id not in managed_user_ids(u): raise HTTPException(403,"You can only manage users in your own hierarchy")
     d=p.data; vals={}
-    for k in ("name","manager_id","title","region","category","active"):
+    for k in (("name","manager_id","title","region","category","active") if _HAS_CATEGORY else ("name","manager_id","title","region","active")):
         if k in d: vals[k]=d[k] if d[k]!="" else None
     if d.get("role"):
         rr=row(select(roles).where(roles.c.name==d["role"]))
@@ -1515,6 +1538,7 @@ def kpi_review_action(actual_id:int,p:Payload,u=Depends(require_csrf)):
 def kpi_users_with_category(u=Depends(current_user)):
     """List users that have a category assigned (for admin review dropdown)."""
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
+    if not _HAS_CATEGORY: return []
     return rows(select(users.c.id,users.c.name,users.c.category).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name))
 
 @app.post("/api/kpi/templates")

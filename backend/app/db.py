@@ -504,7 +504,10 @@ def init_db(seed_demo: bool | None = None, create_schema: bool = True):
     if os.getenv("SEED_DEMO_DATA", "false").lower() == "true":
         _seed_demo_business()
     _migrate_hierarchy_scopes()
-    _seed_kpi_templates()
+    try:
+        _seed_kpi_templates()
+    except Exception:
+        pass  # Table may not exist yet if schema is managed externally
 
 def _bootstrap_initial_admin():
     """First start of an empty production database: create one Super Admin from INITIAL_ADMIN_EMAIL / INITIAL_ADMIN_PASSWORD."""
