@@ -49,10 +49,12 @@ export default function ProspectMap({locations=[],totalLeads=0}){
     })
     mapInstance.current=map
 
-    // Dark tile layer
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-      subdomains:'abcd',maxZoom:19
+    // Dark tile layer (free, no API key)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      maxZoom:19,attribution:''
     }).addTo(map)
+    // Apply dark filter via CSS on the tile pane
+    map.getContainer().querySelector('.leaflet-tile-pane').style.filter='brightness(0.35) saturate(0.3) hue-rotate(190deg) contrast(1.1)'
 
     // Resolve locations to coordinates
     const points=[]
