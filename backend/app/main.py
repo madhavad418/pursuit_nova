@@ -19,7 +19,7 @@ from typing import Any
 import jwt
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -1599,6 +1599,172 @@ def kpi_admin_sheet(category:str=Query(default=""),month:str=Query(default=""),u
     for t in tpls:
         items.append({**t,"target_value":tgt_map.get(t["id"],0),"actuals":act_by_user.get(t["id"],[])})
     return {"month":month,"items":items}
+
+# ── CSV Import ────────────────────────────────────────────────────────────────
+
+SAMPLE_CSV_HEADER = "Company,Vertical,Region,Country,Contact Name,Designation,Email,Phone,Signal,Source,Status,Next Follow-up,Remarks,Owner Email"
+SAMPLE_CSV_ROWS = [
+    "Acme Corp,Telecommunications,North America,USA,John Smith,VP Engineering,john@acme.com,+1-555-0100,Warm,LinkedIn,New,2026-10-15,Interested in geospatial services,bd.exec1@jsan.local",
+    "GlobalTech Ltd,Data & AI,Europe,UK,Jane Doe,Director,jane@globaltech.com,+44-20-1234,Hot,Referral,Engaged,2026-10-10,Active discussion on AI pipeline,bd.exec2@jsan.local",
+]
+STATUS_MAP = {
+    "outreach sent": "Contacted", "follow-up sent": "Contacted", "qualified response": "Qualified",
+    "active discussion": "Engaged", "meeting scheduled": "Engaged", "nurture": "On Hold",
+    "new": "New", "assigned": "Assigned", "contacted": "Contacted", "engaged": "Engaged",
+    "qualified": "Qualified", "converted": "Converted", "on hold": "On Hold",
+    "unresponsive": "Unresponsive", "disqualified": "Disqualified", "lost": "Lost",
+}
+VALID_STATUSES = {"New","Assigned","Contacted","Engaged","Qualified","Converted","On Hold","Unresponsive","Disqualified","Lost"}
+VALID_SIGNALS = {"Hot","Warm","Cold"}
+
+@app.get("/api/leads/import/sample")
+def download_sample_csv(u=Depends(require_perm("LEAD_CREATE"))):
+    content = SAMPLE_CSV_HEADER + "\n" + "\n".join(SAMPLE_CSV_ROWS) + "\n"
+    return StreamingResponse(iter([content]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=pursuitnova_import_sample.csv"})
+
+@app.post("/api/leads/import")
+def import_leads_csv(file: UploadFile = File(...), u=Depends(current_user)):
+    if "LEAD_CREATE" not in u.get("permissions", []): raise HTTPException(403, "Lead create permission required")
+    # Read and parse CSV
+    try:
+        raw = file.file.read()
+        for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try: text = raw.decode(enc); break
+            except Exception: continue
+        else: raise ValueError("Unable to decode file")
+        reader = csv.DictReader(io.StringIO(text))
+    except Exception as e:
+        raise HTTPException(400, f"Cannot read CSV: {e}")
+
+    fields = [f.strip().lower() for f in (reader.fieldnames or [])]
+    required = {"company"}
+    missing_cols = required - {f.replace(" ", "").replace("_", "") for f in fields}
+    if missing_cols:
+        raise HTTPException(400, f"Missing required column(s): {', '.join(required)}. Found: {', '.join(reader.fieldnames or [])}")
+
+    # Resolve owner lookup cache
+    user_cache = {}
+    for ur in rows(select(users.c.id, users.c.name, users.c.email)):
+        user_cache[ur["email"].lower()] = ur["id"]
+        user_cache[ur["name"].lower()] = ur["id"]
+
+    results = {"imported": 0, "skipped": 0, "errors": [], "warnings": []}
+
+    for idx, raw_row in enumerate(reader, start=2):
+        row_num = idx
+        r = {k.strip().lower().replace(" ", "_"): (v.strip() if v else "") for k, v in raw_row.items() if k}
+        company_name = r.get("company", "").strip()
+        if not company_name:
+            results["errors"].append({"row": row_num, "message": "Company name is empty — row skipped"})
+            results["skipped"] += 1
+            continue
+
+        # Resolve owner
+        owner_key = (r.get("owner_email") or r.get("owner") or "").strip().lower()
+        owner_id = user_cache.get(owner_key, u["id"])
+        if owner_key and owner_key not in user_cache:
+            results["warnings"].append({"row": row_num, "message": f"Owner '{r.get('owner_email') or r.get('owner')}' not found — assigned to you"})
+
+        # Map status
+        raw_status = (r.get("status") or "New").strip()
+        status = STATUS_MAP.get(raw_status.lower(), raw_status)
+        if status not in VALID_STATUSES:
+            results["warnings"].append({"row": row_num, "message": f"Unknown status '{raw_status}' — defaulted to 'New'"})
+            status = "New"
+
+        # Map signal
+        signal = (r.get("signal") or r.get("temperature") or "Warm").strip().title()
+        if signal not in VALID_SIGNALS:
+            results["warnings"].append({"row": row_num, "message": f"Unknown signal '{signal}' — defaulted to 'Warm'"})
+            signal = "Warm"
+
+        # Check duplicate company
+        norm = normalize_name(company_name)
+        existing_company = row(select(companies.c.id, companies.c.name).where(companies.c.normalized_name == norm)) if norm else None
+
+        try:
+            if existing_company:
+                company_id = existing_company["id"]
+                results["warnings"].append({"row": row_num, "message": f"Company '{company_name}' already exists — linked to existing"})
+            else:
+                company_id = execute(insert(companies).values(
+                    name=company_name, normalized_name=norm,
+                    vertical=r.get("vertical") or "Other",
+                    website=r.get("website") or None, domain=domain_from_url(r.get("website")),
+                    region=r.get("region") or None, country=r.get("country") or None,
+                    state=r.get("state") or None, city=r.get("city") or None,
+                    status="Active", created_by=u["id"]
+                ))
+
+            # Check duplicate lead for same company
+            existing_lead = row(select(leads.c.id).where(leads.c.company_id == company_id))
+            if existing_lead:
+                results["warnings"].append({"row": row_num, "message": f"Lead for '{company_name}' already exists — skipped lead creation"})
+                results["skipped"] += 1
+                continue
+
+            # Parse follow-up date
+            next_fu = None
+            raw_fu = r.get("next_follow-up") or r.get("next_follow_up") or r.get("next_action_date") or ""
+            if raw_fu:
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+                    try: next_fu = datetime.strptime(raw_fu, fmt).strftime("%Y-%m-%d"); break
+                    except Exception: pass
+
+            source = r.get("source") or "Other"
+            remarks = r.get("remarks") or r.get("received_summary") or r.get("next_action") or ""
+
+            lead_id = execute(insert(leads).values(
+                company_id=company_id, owner_id=owner_id,
+                temperature=signal, source=source, status=status,
+                region=r.get("region") or None, country=r.get("country") or None,
+                next_follow_up=next_fu, remarks=remarks, created_by=u["id"]
+            ))
+
+            # Create contact if provided
+            contact_name = r.get("contact_name") or r.get("contact") or ""
+            if contact_name:
+                emails = [e.strip() for e in (r.get("email") or "").split(";") if e.strip() and "@" in e]
+                primary_email = emails[0] if emails else None
+                ne = normalize_email(primary_email)
+                execute(insert(contacts).values(
+                    company_id=company_id, name=contact_name,
+                    designation=r.get("designation") or None,
+                    email=primary_email, normalized_email=ne,
+                    phone=r.get("phone") or None,
+                    is_primary=True, active=True, created_by=u["id"]
+                ))
+                # Additional contacts from semicolon-separated emails
+                for extra_email in emails[1:]:
+                    ene = normalize_email(extra_email)
+                    if ene and not row(select(contacts.c.id).where(and_(contacts.c.company_id == company_id, contacts.c.normalized_email == ene))):
+                        execute(insert(contacts).values(
+                            company_id=company_id, name=extra_email.split("@")[0],
+                            email=extra_email, normalized_email=ene,
+                            is_primary=False, active=True, created_by=u["id"]
+                        ))
+
+            # Create action from "Next action" or "Sent subject"
+            action_desc = r.get("next_action") or r.get("sent_subject") or None
+            if action_desc and lead_id:
+                execute(insert(actions).values(
+                    lead_id=lead_id, action_date=today_str(),
+                    description=action_desc, assigned_to=owner_id,
+                    due_date=next_fu or (date.today() + timedelta(days=7)).isoformat(),
+                    status="Open", priority="Medium", created_by=u["id"]
+                ))
+
+            audit(u["id"], "lead", lead_id, "IMPORT", {"company": company_name, "source": "csv"})
+            results["imported"] += 1
+
+        except IntegrityError as e:
+            results["errors"].append({"row": row_num, "message": f"Database error: {str(e)[:100]}"})
+            results["skipped"] += 1
+        except Exception as e:
+            results["errors"].append({"row": row_num, "message": str(e)[:150]})
+            results["skipped"] += 1
+
+    return results
 
 # Static no-build PWA UI. API routes are registered first, so /api remains authoritative.
 STATIC_DIR=os.getenv("FRONTEND_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__),"..","..","frontend","dist"))
