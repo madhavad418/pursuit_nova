@@ -779,7 +779,7 @@ def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
 @app.delete("/api/leads/{lead_id}")
 def delete_lead(lead_id:int,u=Depends(require_csrf)):
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete leads")
-    l=row(select(leads).where(leads.c.id==lead_id))
+    l=row(select(leads,companies.c.name.label("company_name")).select_from(leads.join(companies,companies.c.id==leads.c.company_id)).where(leads.c.id==lead_id))
     if not l: raise HTTPException(404,"Lead not found")
     if not can_edit_lead(u,lead_id): raise HTTPException(403,"You cannot delete this lead")
     opp_ids=[r["id"] for r in rows(select(opportunities.c.id).where(opportunities.c.lead_id==lead_id))]
@@ -792,7 +792,7 @@ def delete_lead(lead_id:int,u=Depends(require_csrf)):
     execute(delete(meetings).where(meetings.c.lead_id==lead_id))
     execute(delete(record_shares).where(and_(record_shares.c.entity_type=="lead",record_shares.c.entity_id==lead_id)))
     execute(delete(leads).where(leads.c.id==lead_id))
-    audit(u["id"],"lead",lead_id,"DELETE",{"company_name":l["company_name"]}); return {"ok":True}
+    audit(u["id"],"lead",lead_id,"DELETE",{"company_name":l.get("company_name","")}); return {"ok":True}
 
 @app.post("/api/leads/{lead_id}/share")
 def share_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
