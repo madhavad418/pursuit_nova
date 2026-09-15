@@ -44,6 +44,7 @@ from app.db import (
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
     org_settings, fx_rates, field_permissions, saved_views, dashboard_preferences, microsoft_integrations,
+    kpi_templates, kpi_targets, kpi_actuals,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -83,7 +84,7 @@ if OTEL_EXPORTER_OTLP_ENDPOINT and TracerProvider:
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT.rstrip("/")+"/v1/traces")))
     trace.set_tracer_provider(provider)
 TRACER=trace.get_tracer("jsan-pursuitnova") if trace else None
-origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",") if x.strip()]
+origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:8000,http://127.0.0.1:8000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.middleware("http")
@@ -154,7 +155,7 @@ def get_permissions(user_id: int) -> list[str]:
     return [r["code"] for r in rows(stmt)]
 
 def safe_user(user_id: int):
-    r = row(select(users.c.id, users.c.name, users.c.email, users.c.manager_id, users.c.title, users.c.region,
+    r = row(select(users.c.id, users.c.name, users.c.email, users.c.manager_id, users.c.title, users.c.region, users.c.category,
                    users.c.active, users.c.mfa_enabled, roles.c.name.label("role"), roles.c.scope_type, roles.c.rank)
             .select_from(users.join(roles, users.c.role_id == roles.c.id)).where(users.c.id == user_id))
     if r:
@@ -447,13 +448,13 @@ def mfa_enable(p:Payload,u=Depends(require_csrf)):
 def assignable(u=Depends(current_user)):
     ids=set(scope_user_ids(u)); root=None if is_super(u) else org_root(u["id"])
     ids.update(r["id"] for r in rows(select(users.c.id).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(roles.c.name=="Presales Lead",users.c.active==True))) if root is None or org_root(r["id"])==root)
-    stmt=select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,users.c.title,users.c.region).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(users.c.active==True,users.c.id.in_(sorted(ids)))).order_by(roles.c.rank,users.c.name)
+    stmt=select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,users.c.title,users.c.region,users.c.category).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(and_(users.c.active==True,users.c.id.in_(sorted(ids)))).order_by(roles.c.rank,users.c.name)
     return rows(stmt)
 
 @app.get("/api/users")
 def list_users(u=Depends(require_perm("USER_ADMIN"))):
     m=users.alias("m")
-    return rows(select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,m.c.name.label("manager_name"),users.c.title,users.c.region,users.c.active,users.c.mfa_enabled,users.c.created_at).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
+    return rows(select(users.c.id,users.c.name,users.c.email,roles.c.name.label("role"),users.c.manager_id,m.c.name.label("manager_name"),users.c.title,users.c.region,users.c.category,users.c.active,users.c.mfa_enabled,users.c.created_at).select_from(users.join(roles,users.c.role_id==roles.c.id).outerjoin(m,m.c.id==users.c.manager_id)).where(users.c.id.in_(sorted(managed_user_ids(u)|{u["id"]}))).order_by(users.c.id))
 
 def managed_user_ids(u) -> set[int]:
     """Users an administrator may manage: everyone for organisation-wide roles, otherwise their own reporting tree."""
@@ -485,7 +486,7 @@ def create_user(p:Payload,u=Depends(require_csrf)):
     manager_id=int(d["manager_id"]) if d.get("manager_id") else (None if is_super(u) else u["id"])
     ensure_manager_in_hierarchy(u,manager_id)
     validate_manager_assignment(None,manager_id)
-    try: uid=execute(insert(users).values(name=d["name"],email=d["email"].lower(),password_hash=hash_password(d["password"]),role_id=rr["id"],manager_id=manager_id,title=d.get("title"),region=d.get("region"),active=True))
+    try: uid=execute(insert(users).values(name=d["name"],email=d["email"].lower(),password_hash=hash_password(d["password"]),role_id=rr["id"],manager_id=manager_id,title=d.get("title"),region=d.get("region"),category=d.get("category"),active=True))
     except IntegrityError: raise HTTPException(400,"Email already exists")
     audit(u["id"],"user",uid,"CREATE",{"name":d["name"],"role":d["role"]}); return safe_user(uid)
 
@@ -494,7 +495,7 @@ def update_user(user_id:int,p:Payload,u=Depends(require_csrf)):
     if "USER_ADMIN" not in u["permissions"]: raise HTTPException(403,"User administration permission required")
     if not is_super(u) and user_id not in managed_user_ids(u): raise HTTPException(403,"You can only manage users in your own hierarchy")
     d=p.data; vals={}
-    for k in ("name","manager_id","title","region","active"):
+    for k in ("name","manager_id","title","region","category","active"):
         if k in d: vals[k]=d[k] if d[k]!="" else None
     if d.get("role"):
         rr=row(select(roles).where(roles.c.name==d["role"]))
@@ -752,6 +753,24 @@ def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
         vals["owner_id"]=oid
     vals["updated_at"]=utcnow(); execute(update(leads).where(leads.c.id==lead_id).values(**vals)); audit(u["id"],"lead",lead_id,"UPDATE",d); return lead_detail(lead_id,u)
 
+@app.delete("/api/leads/{lead_id}")
+def delete_lead(lead_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete leads")
+    l=row(select(leads).where(leads.c.id==lead_id))
+    if not l: raise HTTPException(404,"Lead not found")
+    if not can_edit_lead(u,lead_id): raise HTTPException(403,"You cannot delete this lead")
+    opp_ids=[r["id"] for r in rows(select(opportunities.c.id).where(opportunities.c.lead_id==lead_id))]
+    if opp_ids:
+        execute(delete(followups).where(followups.c.opportunity_id.in_(opp_ids)))
+        execute(delete(opportunity_team).where(opportunity_team.c.opportunity_id.in_(opp_ids)))
+        execute(delete(opportunities).where(opportunities.c.lead_id==lead_id))
+    execute(delete(actions).where(actions.c.lead_id==lead_id))
+    execute(delete(moms).where(moms.c.lead_id==lead_id))
+    execute(delete(meetings).where(meetings.c.lead_id==lead_id))
+    execute(delete(record_shares).where(and_(record_shares.c.entity_type=="lead",record_shares.c.entity_id==lead_id)))
+    execute(delete(leads).where(leads.c.id==lead_id))
+    audit(u["id"],"lead",lead_id,"DELETE",{"company_name":l["company_name"]}); return {"ok":True}
+
 @app.post("/api/leads/{lead_id}/share")
 def share_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
     if "SHARE_RECORD" not in u["permissions"] or not can_view_lead(u,lead_id): raise HTTPException(403,"Record-share permission required")
@@ -821,6 +840,14 @@ def update_action(action_id:int,p:Payload,u=Depends(require_csrf)):
     d=p.data; vals={k:d[k] for k in ("description","assigned_to","due_date","status","priority","remarks","completion_date") if k in d}
     if d.get("status")=="Completed" and not d.get("completion_date"): vals["completion_date"]=today_str()
     vals["updated_at"]=utcnow(); execute(update(actions).where(actions.c.id==action_id).values(**vals)); audit(u["id"],"action",action_id,"UPDATE",d); return row(select(actions).where(actions.c.id==action_id))
+
+@app.delete("/api/actions/{action_id}")
+def delete_action(action_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete actions")
+    a=row(select(actions).where(actions.c.id==action_id))
+    if not a: raise HTTPException(404,"Action not found")
+    execute(delete(actions).where(actions.c.id==action_id))
+    audit(u["id"],"action",action_id,"DELETE",{"description":a["description"]}); return {"ok":True}
 
 @app.get("/api/opportunities")
 def list_opportunities(u=Depends(require_perm("OPPORTUNITY_VIEW"))): return opportunity_rows(u)
@@ -1085,13 +1112,19 @@ def global_search(q:str=Query(min_length=2),u=Depends(current_user)):
     return results[:50]
 
 @app.get("/api/reports/period")
-def period_report(year:int=Query(default=date.today().year),period:str=Query(default="Q1"),u=Depends(require_perm("REPORT_VIEW"))):
+def period_report(year:int=Query(default=date.today().year),period:str=Query(default="Q1"),region:str=Query(default=""),u=Depends(require_perm("REPORT_VIEW"))):
     p=period.upper()
     if p not in {"Q1","Q2","Q3","Q4","H1","H2"}: raise HTTPException(400,"Period must be Q1-Q4, H1 or H2")
     if p.startswith("Q"): start,end=quarter_range(year,p)
     elif p=="H1": start,end=date(year,1,1),date(year,7,1)
     else: start,end=date(year,7,1),date(year+1,1,1)
     ls=lead_rows(u); os_=opportunity_rows(u); rates=fx_map(); corp=corporate_currency(); missing=set()
+    if region:
+        lead_ids_in_region={x["id"] for x in ls if (x.get("region") or "").lower()==region.lower()}
+        ls=[x for x in ls if x["id"] in lead_ids_in_region]
+        os_=[x for x in os_ if x.get("lead_id") in lead_ids_in_region]
+    # Collect all unique regions for the dropdown
+    all_regions=sorted({x.get("region") or "Unassigned" for x in lead_rows(u)})
     def cv(v,c):
         x=to_corporate(v,c,rates)
         if x is None: missing.add(c or corp); return 0.0
@@ -1114,7 +1147,7 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
         verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["won"]+=1
         owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0})["won"]+=value
-    return {"period":p,"year":year,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":sorted(sources.values(),key=lambda x:x["leads"],reverse=True),"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True)}
+    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":sorted(sources.values(),key=lambda x:x["leads"],reverse=True),"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True)}
 
 @app.get("/api/admin/master-values")
 def get_masters(u=Depends(current_user)): return rows(select(master_values).where(master_values.c.active==True).order_by(master_values.c.category,master_values.c.sort_order))
@@ -1373,6 +1406,174 @@ def export_opportunities(u=Depends(require_perm("DATA_EXPORT"))):
     out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=["company","opportunity","owner","status","forecast_category","amount","currency","expected_close_date","next_follow_up_date"]); writer.writeheader()
     for o in opportunity_rows(u): writer.writerow({"company":o["company_name"],"opportunity":o["name"],"owner":o["owner_name"],"status":o["status"],"forecast_category":o["forecast_category"],"amount":o["amount"],"currency":o["currency"],"expected_close_date":o.get("expected_close_date"),"next_follow_up_date":o.get("next_follow_up_date")})
     return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=pursuitnova_opportunities.csv"})
+
+# ── KPI Tracking ──────────────────────────────────────────────────────────────
+
+@app.get("/api/kpi/templates")
+def kpi_template_list(category:str=Query(default=""),u=Depends(current_user)):
+    stmt=select(kpi_templates).where(kpi_templates.c.active==True).order_by(kpi_templates.c.category,kpi_templates.c.sort_order)
+    if category: stmt=stmt.where(kpi_templates.c.category==category)
+    return rows(stmt)
+
+@app.get("/api/kpi/targets")
+def kpi_target_list(category:str=Query(default=""),month:str=Query(default=""),u=Depends(current_user)):
+    stmt=select(kpi_targets,kpi_templates.c.category,kpi_templates.c.kra,kpi_templates.c.kpi,kpi_templates.c.sort_order).select_from(kpi_targets.join(kpi_templates,kpi_templates.c.id==kpi_targets.c.template_id)).order_by(kpi_templates.c.category,kpi_templates.c.sort_order)
+    if category: stmt=stmt.where(kpi_templates.c.category==category)
+    if month: stmt=stmt.where(kpi_targets.c.month==month)
+    return rows(stmt)
+
+@app.put("/api/kpi/targets")
+def kpi_target_upsert(p:Payload,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only admins can set KPI targets")
+    d=p.data; tid=int(d["template_id"]); month=d["month"]; val=float(d["target_value"])
+    existing=row(select(kpi_targets).where(and_(kpi_targets.c.template_id==tid,kpi_targets.c.month==month)))
+    if existing:
+        execute(update(kpi_targets).where(kpi_targets.c.id==existing["id"]).values(target_value=val,updated_at=utcnow()))
+    else:
+        execute(insert(kpi_targets).values(template_id=tid,month=month,target_value=val,created_by=u["id"]))
+    return {"ok":True}
+
+@app.get("/api/kpi/my")
+def kpi_my_actuals(month:str=Query(default=""),u=Depends(current_user)):
+    """Return the current user's KPI sheet: templates + targets + actuals for their category."""
+    cat=u.get("category")
+    if not cat: return {"category":None,"items":[]}
+    tpls=rows(select(kpi_templates).where(and_(kpi_templates.c.category==cat,kpi_templates.c.active==True)).order_by(kpi_templates.c.sort_order))
+    if not month: month=date.today().strftime("%Y-%m")
+    tgt_map={}
+    for t in rows(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_([x["id"] for x in tpls]),kpi_targets.c.month==month))):
+        tgt_map[t["template_id"]]=t["target_value"]
+    act_map={}
+    for a in rows(select(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id.in_([x["id"] for x in tpls]),kpi_actuals.c.month==month))):
+        act_map[a["template_id"]]=a
+    items=[]
+    for t in tpls:
+        act=act_map.get(t["id"],{})
+        items.append({**t,"target_value":tgt_map.get(t["id"],0),"actual_value":act.get("actual_value"),"actual_remarks":act.get("remarks"),"actual_status":act.get("status","draft"),"review_remarks":act.get("review_remarks"),"actual_id":act.get("id")})
+    return {"category":cat,"month":month,"items":items}
+
+@app.put("/api/kpi/actuals")
+def kpi_actual_upsert(p:Payload,u=Depends(require_csrf)):
+    """User submits or updates their own KPI actual for a given template+month."""
+    d=p.data; tid=int(d["template_id"]); month=d["month"]; val=float(d["actual_value"]); remarks=d.get("remarks","")
+    status=d.get("status","draft")
+    if status not in ("draft","submitted"): status="draft"
+    existing=row(select(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id==tid,kpi_actuals.c.month==month)))
+    if existing:
+        if existing["status"]=="approved": raise HTTPException(400,"Cannot edit an approved KPI entry")
+        execute(update(kpi_actuals).where(kpi_actuals.c.id==existing["id"]).values(actual_value=val,remarks=remarks,status=status,updated_at=utcnow()))
+    else:
+        execute(insert(kpi_actuals).values(user_id=u["id"],template_id=tid,month=month,actual_value=val,remarks=remarks,status=status))
+    return {"ok":True}
+
+@app.post("/api/kpi/submit")
+def kpi_submit_month(p:Payload,u=Depends(require_csrf)):
+    """Mark all draft actuals for a month as submitted."""
+    month=p.data.get("month") or date.today().strftime("%Y-%m")
+    cat=u.get("category")
+    if not cat: raise HTTPException(400,"No category assigned to your profile")
+    tpl_ids=[t["id"] for t in rows(select(kpi_templates.c.id).where(kpi_templates.c.category==cat))]
+    execute(update(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id.in_(tpl_ids),kpi_actuals.c.month==month,kpi_actuals.c.status=="draft")).values(status="submitted",updated_at=utcnow()))
+    return {"ok":True}
+
+@app.get("/api/kpi/review")
+def kpi_review_list(month:str=Query(default=""),user_id:int=Query(default=0),u=Depends(current_user)):
+    """Admin/Super Admin: list all users' submitted/approved KPI actuals for review."""
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Review requires admin role")
+    if not month: month=date.today().strftime("%Y-%m")
+    uu=users.alias("uu")
+    stmt=select(kpi_actuals,kpi_templates.c.category,kpi_templates.c.kra,kpi_templates.c.kpi,kpi_templates.c.sort_order,uu.c.name.label("user_name"),uu.c.category.label("user_category")).select_from(kpi_actuals.join(kpi_templates,kpi_templates.c.id==kpi_actuals.c.template_id).join(uu,uu.c.id==kpi_actuals.c.user_id)).where(and_(kpi_actuals.c.month==month,kpi_actuals.c.status.in_(["submitted","approved","rejected"]))).order_by(uu.c.name,kpi_templates.c.sort_order)
+    if user_id: stmt=stmt.where(kpi_actuals.c.user_id==user_id)
+    items=rows(stmt)
+    # Also fetch targets for these templates
+    tpl_ids=list({i["template_id"] for i in items})
+    tgt_map={}
+    if tpl_ids:
+        for t in rows(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_(tpl_ids),kpi_targets.c.month==month))):
+            tgt_map[t["template_id"]]=t["target_value"]
+    for i in items: i["target_value"]=tgt_map.get(i["template_id"],0)
+    # Group by user
+    by_user={}
+    for i in items:
+        uid=i["user_id"]
+        if uid not in by_user: by_user[uid]={"user_id":uid,"user_name":i["user_name"],"category":i["user_category"],"items":[]}
+        by_user[uid]["items"].append(i)
+    return list(by_user.values())
+
+@app.put("/api/kpi/review/{actual_id}")
+def kpi_review_action(actual_id:int,p:Payload,u=Depends(require_csrf)):
+    """Admin approves or rejects a submitted KPI actual."""
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Review requires admin role")
+    d=p.data; status=d.get("status")
+    if status not in ("approved","rejected"): raise HTTPException(400,"Status must be approved or rejected")
+    a=row(select(kpi_actuals).where(kpi_actuals.c.id==actual_id))
+    if not a: raise HTTPException(404,"KPI entry not found")
+    execute(update(kpi_actuals).where(kpi_actuals.c.id==actual_id).values(status=status,reviewed_by=u["id"],review_remarks=d.get("review_remarks",""),reviewed_at=utcnow(),updated_at=utcnow()))
+    return {"ok":True}
+
+@app.get("/api/kpi/users-with-category")
+def kpi_users_with_category(u=Depends(current_user)):
+    """List users that have a category assigned (for admin review dropdown)."""
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
+    return rows(select(users.c.id,users.c.name,users.c.category).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name))
+
+@app.post("/api/kpi/templates")
+def kpi_template_create(p:Payload,u=Depends(require_csrf)):
+    """Admin creates a new KPI template with optional target for a month."""
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only admins can create KPI templates")
+    d=p.data
+    if not d.get("category") or not d.get("kra") or not d.get("kpi"): raise HTTPException(400,"Category, KRA and KPI are required")
+    max_sort=row(select(func.max(kpi_templates.c.sort_order).label("mx")).where(kpi_templates.c.category==d["category"]))
+    sort_order=(max_sort["mx"] or 0)+1 if max_sort else 1
+    tid=execute(insert(kpi_templates).values(category=d["category"],kra=d["kra"],kpi=d["kpi"],sort_order=sort_order,active=True))
+    if d.get("month") and d.get("target_value") is not None:
+        execute(insert(kpi_targets).values(template_id=tid,month=d["month"],target_value=float(d["target_value"]),created_by=u["id"]))
+    return {"ok":True,"id":tid}
+
+@app.put("/api/kpi/templates/{template_id}")
+def kpi_template_update(template_id:int,p:Payload,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
+    d=p.data; vals={}
+    if d.get("kra"): vals["kra"]=d["kra"]
+    if d.get("kpi"): vals["kpi"]=d["kpi"]
+    if d.get("category"): vals["category"]=d["category"]
+    if not vals: raise HTTPException(400,"Nothing to update")
+    execute(update(kpi_templates).where(kpi_templates.c.id==template_id).values(**vals))
+    return {"ok":True}
+
+@app.delete("/api/kpi/templates/{template_id}")
+def kpi_template_delete(template_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
+    execute(delete(kpi_actuals).where(kpi_actuals.c.template_id==template_id))
+    execute(delete(kpi_targets).where(kpi_targets.c.template_id==template_id))
+    execute(delete(kpi_templates).where(kpi_templates.c.id==template_id))
+    return {"ok":True}
+
+@app.get("/api/kpi/admin-sheet")
+def kpi_admin_sheet(category:str=Query(default=""),month:str=Query(default=""),u=Depends(current_user)):
+    """Admin view: all templates for a category with targets + all users' actuals for that month."""
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
+    if not month: month=date.today().strftime("%Y-%m")
+    stmt=select(kpi_templates).where(kpi_templates.c.active==True).order_by(kpi_templates.c.sort_order)
+    if category: stmt=stmt.where(kpi_templates.c.category==category)
+    tpls=rows(stmt)
+    tpl_ids=[t["id"] for t in tpls]
+    tgt_map={}
+    if tpl_ids:
+        for t in rows(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_(tpl_ids),kpi_targets.c.month==month))):
+            tgt_map[t["template_id"]]=t["target_value"]
+    # Get all users' actuals for these templates
+    act_by_user={}
+    if tpl_ids:
+        uu=users.alias("uu")
+        for a in rows(select(kpi_actuals,uu.c.name.label("user_name")).select_from(kpi_actuals.join(uu,uu.c.id==kpi_actuals.c.user_id)).where(and_(kpi_actuals.c.template_id.in_(tpl_ids),kpi_actuals.c.month==month))):
+            key=a["template_id"]
+            if key not in act_by_user: act_by_user[key]=[]
+            act_by_user[key].append({"user_id":a["user_id"],"user_name":a["user_name"],"actual_value":a["actual_value"],"status":a["status"]})
+    items=[]
+    for t in tpls:
+        items.append({**t,"target_value":tgt_map.get(t["id"],0),"actuals":act_by_user.get(t["id"],[])})
+    return {"month":month,"items":items}
 
 # Static no-build PWA UI. API routes are registered first, so /api remains authoritative.
 STATIC_DIR=os.getenv("FRONTEND_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__),"..","..","frontend","dist"))

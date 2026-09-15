@@ -65,6 +65,7 @@ users = Table(
     Column("manager_id", ForeignKey("users.id")),
     Column("title", String(160)),
     Column("region", String(80)),
+    Column("category", String(80)),
     Column("active", Boolean, nullable=False, default=True),
     Column("mfa_enabled", Boolean, nullable=False, default=False),
     Column("mfa_secret", String(64)),
@@ -388,6 +389,44 @@ revoked_sessions = Table(
     Column("revoked_at", DateTime, server_default=func.current_timestamp()),
 )
 
+kpi_templates = Table(
+    "kpi_templates", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("category", String(80), nullable=False),
+    Column("kra", String(255), nullable=False),
+    Column("kpi", String(255), nullable=False),
+    Column("sort_order", Integer, nullable=False, default=0),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+kpi_targets = Table(
+    "kpi_targets", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("template_id", ForeignKey("kpi_templates.id", ondelete="CASCADE"), nullable=False),
+    Column("month", String(7), nullable=False),
+    Column("target_value", Float, nullable=False, default=0),
+    Column("created_by", ForeignKey("users.id")),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+    UniqueConstraint("template_id", "month", name="uq_kpi_target_tpl_month"),
+)
+kpi_actuals = Table(
+    "kpi_actuals", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("template_id", ForeignKey("kpi_templates.id", ondelete="CASCADE"), nullable=False),
+    Column("month", String(7), nullable=False),
+    Column("actual_value", Float, nullable=False, default=0),
+    Column("remarks", Text),
+    Column("status", String(20), nullable=False, default="draft"),
+    Column("reviewed_by", ForeignKey("users.id")),
+    Column("review_remarks", Text),
+    Column("reviewed_at", DateTime),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+    UniqueConstraint("user_id", "template_id", "month", name="uq_kpi_actual_user_tpl_month"),
+)
+
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
@@ -465,6 +504,7 @@ def init_db(seed_demo: bool | None = None, create_schema: bool = True):
     if os.getenv("SEED_DEMO_DATA", "false").lower() == "true":
         _seed_demo_business()
     _migrate_hierarchy_scopes()
+    _seed_kpi_templates()
 
 def _bootstrap_initial_admin():
     """First start of an empty production database: create one Super Admin from INITIAL_ADMIN_EMAIL / INITIAL_ADMIN_PASSWORD."""
@@ -483,6 +523,9 @@ def _add_missing_columns():
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE roles ADD COLUMN created_by INTEGER"))
+    if "category" not in {c["name"] for c in inspect(engine).get_columns("users")}:
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE users ADD COLUMN category VARCHAR(80)"))
 
 def _migrate_hierarchy_scopes():
     """One-time move of Admin/Director from organisation-wide to hierarchy scope, so only Super Admins see everything."""
@@ -693,3 +736,120 @@ def _seed_settings(c):
                 {"code":"HOT_LEAD_INACTIVITY","name":"Hot lead inactivity","description":"Escalate hot leads without activity.","enabled":True,"config_json":"{\"days\":7}"},
                 {"code":"CLOSE_DATE","name":"Expected close reminder","description":"Alert owner before expected close date.","enabled":True,"config_json":"{\"days\":7}"},
             ])
+
+def _seed_kpi_templates():
+    """Seed KRA/KPI template definitions for all 3 categories. Only fills if kpi_templates is empty."""
+    with engine.begin() as c:
+        if c.execute(select(func.count()).select_from(kpi_templates)).scalar_one() > 0:
+            return
+        BD_KRA1 = "Market research and analysis for BD - Conduct, market research and competetive ananlysis to idenitfy trend, risk and growth opportunities"
+        BD_KRA2 = "Sales Pipeline Management; Build, manage and optimize the sale pipeline to continue the deal flow and predicitble revenue"
+        BD_KRA3 = "Proposal, Negotiation/ Partnership and Deal Closure"
+        BD_KRA4 = "Brand, Positioning and Business Promotions"
+        tpls = [
+            # Business Development (Excel Section 1 — Saumya)
+            ("Business Development", BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
+            ("Business Development", BD_KRA1, "Identify prospects; email campaign", 2),
+            ("Business Development", BD_KRA2, "Qualified sales opportunities created", 3),
+            ("Business Development", BD_KRA2, "Lead to deal conversion", 4),
+            ("Business Development", BD_KRA3, "Proposal to closure conversion rate", 5),
+            ("Business Development", BD_KRA3, "No of New Strategic Partnership Signed", 6),
+            ("Business Development", BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
+            ("Business Development", BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
+            ("Business Development", BD_KRA4, "Lead generated from Branding activities through participation, LinkedIn and Websites", 9),
+            ("Business Development", BD_KRA4, "Weekly 01 Post on LinkedIn", 10),
+            ("Business Development", BD_KRA4, "15 days 01 Blog on LinkedIn", 11),
+            # Presales (Excel Section 3 — Gangadhara)
+            ("Presales", BD_KRA1, "New opportunities, newsletters, new trends, market updates", 1),
+            ("Presales", BD_KRA1, "Identify prospects; email campaign", 2),
+            ("Presales", BD_KRA2, "Qualified sales opportunities created", 3),
+            ("Presales", BD_KRA2, "Lead to deal conversion", 4),
+            ("Presales", BD_KRA3, "Proposal to closure conversion rate", 5),
+            ("Presales", BD_KRA3, "No of New Strategic Partnership Signed", 6),
+            ("Presales", BD_KRA3, "RFP / RFQ opportunities identified/ Participation", 7),
+            ("Presales", BD_KRA4, "No of Industry events, forums, webinars, seminars participation", 8),
+            ("Presales", BD_KRA4, "Weekly 01 Post on LinkedIn", 9),
+            ("Presales", BD_KRA4, "15 days 01 Blog on LinkedIn", 10),
+            # Account Management (Excel Section 2 — middle column)
+            ("Account Management", "Market Research & Analysis", "New opportunities, newsletters, trends, updates", 1),
+            ("Account Management", "Market Research & Analysis", "Identify prospects; email campaign", 2),
+            ("Account Management", "Sales Pipeline Management", "Qualified sales opportunities created", 3),
+            ("Account Management", "Sales Pipeline Management", "Lead to deal conversion", 4),
+            ("Account Management", "Proposal, Negotiation & Closure", "Proposal to closure conversion rate", 5),
+            ("Account Management", "Proposal, Negotiation & Closure", "New strategic partnerships signed", 6),
+            ("Account Management", "Proposal, Negotiation & Closure", "RFP/RFQ opportunities identified/participated", 7),
+            ("Account Management", "Branding & Positioning", "Industry events/forums/webinars participation", 8),
+            ("Account Management", "Branding & Positioning", "Leads generated via branding (LinkedIn, website)", 9),
+            ("Account Management", "Branding & Positioning", "Weekly LinkedIn post", 10),
+            ("Account Management", "Branding & Positioning", "Bi-monthly LinkedIn blog", 11),
+            ("Account Management", "Client Relationship Management", "Client satisfaction score (CSAT \u226580%)", 12),
+            ("Account Management", "Client Relationship Management", "Quarterly client review meetings", 13),
+            ("Account Management", "Revenue & Growth", "Quarterly revenue achievement", 14),
+            ("Account Management", "Revenue & Growth", "Upsell/cross-sell deals closed", 15),
+            ("Account Management", "Innovation & Collaboration", "New service ideas proposed", 16),
+            ("Account Management", "Innovation & Collaboration", "Joint initiatives with delivery/quality teams", 17),
+            ("Account Management", "Governance & Reporting", "Weekly pipeline reports submitted", 18),
+            ("Account Management", "Governance & Reporting", "Monthly BD dashboard updates", 19),
+        ]
+        c.execute(insert(kpi_templates), [{"category": cat, "kra": kra, "kpi": kpi, "sort_order": so, "active": True} for cat, kra, kpi, so in tpls])
+
+        # Seed default monthly targets from KPI.xlsx
+        tpl_rows = c.execute(select(kpi_templates.c.id, kpi_templates.c.category, kpi_templates.c.kpi)).fetchall()
+        tpl_map = {(r[1], r[2]): r[0] for r in tpl_rows}
+
+        bd_targets = {
+            "New opportunities, newsletters, new trends, market updates": [5, 5, 5],
+            "Identify prospects; email campaign": [30, 30, 50],
+            "Qualified sales opportunities created": [12, 20, 28],
+            "Lead to deal conversion": [5, 5, 5],
+            "Proposal to closure conversion rate": [3, 3, 3],
+            "No of New Strategic Partnership Signed": [5, 5, 5],
+            "RFP / RFQ opportunities identified/ Participation": [8, 12, 15],
+            "No of Industry events, forums, webinars, seminars participation": [1, 1, 1],
+            "Lead generated from Branding activities through participation, LinkedIn and Websites": [2, 2, 2],
+            "Weekly 01 Post on LinkedIn": [4, 4, 4],
+            "15 days 01 Blog on LinkedIn": [2, 2, 2],
+        }
+        presales_targets = {
+            "New opportunities, newsletters, new trends, market updates": [5, 20, 30],
+            "Identify prospects; email campaign": [50, 150, 150],
+            "Qualified sales opportunities created": [3, 10, 20],
+            "Lead to deal conversion": [3, 5, 10],
+            "Proposal to closure conversion rate": [3, 5, 10],
+            "No of New Strategic Partnership Signed": [1, 1, 1],
+            "RFP / RFQ opportunities identified/ Participation": [5, 5, 5],
+            "No of Industry events, forums, webinars, seminars participation": [0, 0, 0],
+            "Weekly 01 Post on LinkedIn": [0, 3, 3],
+            "15 days 01 Blog on LinkedIn": [0, 2, 2],
+        }
+        am_targets = {
+            "New opportunities, newsletters, trends, updates": [5, 5, 5],
+            "Identify prospects; email campaign": [30, 30, 50],
+            "Qualified sales opportunities created": [12, 20, 28],
+            "Lead to deal conversion": [5, 5, 5],
+            "Proposal to closure conversion rate": [3, 3, 3],
+            "New strategic partnerships signed": [5, 5, 5],
+            "RFP/RFQ opportunities identified/participated": [8, 12, 15],
+            "Industry events/forums/webinars participation": [1, 2, 2],
+            "Leads generated via branding (LinkedIn, website)": [2, 2, 2],
+            "Weekly LinkedIn post": [4, 4, 4],
+            "Bi-monthly LinkedIn blog": [2, 2, 2],
+            "Client satisfaction score (CSAT \u226580%)": [80, 80, 80],
+            "Quarterly client review meetings": [2, 2, 2],
+            "Quarterly revenue achievement": [100, 100, 100],
+            "Upsell/cross-sell deals closed": [2, 3, 3],
+            "New service ideas proposed": [1, 1, 1],
+            "Joint initiatives with delivery/quality teams": [2, 2, 2],
+            "Weekly pipeline reports submitted": [4, 4, 4],
+            "Monthly BD dashboard updates": [1, 1, 1],
+        }
+        months = ["2026-09", "2026-10", "2026-11"]
+        target_rows = []
+        for cat, tgt_map in [("Business Development", bd_targets), ("Presales", presales_targets), ("Account Management", am_targets)]:
+            for kpi_name, vals in tgt_map.items():
+                tid = tpl_map.get((cat, kpi_name))
+                if tid:
+                    for i, v in enumerate(vals):
+                        target_rows.append({"template_id": tid, "month": months[i], "target_value": float(v)})
+        if target_rows:
+            c.execute(insert(kpi_targets), target_rows)

@@ -13,6 +13,7 @@ const PipelinePage=lazy(()=>import('./pages/PipelinePage'))
 const ForecastPage=lazy(()=>import('./pages/ForecastPage'))
 const LeadershipPage=lazy(()=>import('./pages/LeadershipPage'))
 const AdminPage=lazy(()=>import('./pages/AdminPage'))
+const KPIPage=lazy(()=>import('./pages/KPIPage'))
 // Pages whose data needs a role permission; without it the page explains instead of failing.
 const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
 
@@ -38,6 +39,7 @@ function Product(){
  else if(route.path==='/pipeline')page=<PipelinePage route={route} onToast={setToast}/>
  else if(route.path==='/forecast')page=<ForecastPage onToast={setToast}/>
  else if(route.path==='/leadership')page=<LeadershipPage/>
+ else if(route.path==='/kpi')page=<KPIPage onToast={setToast}/>
  else if(route.path==='/admin')page=<AdminPage onToast={setToast}/>
  else page=<DashboardPage/>
  const need=PAGE_PERMS.find(([prefix])=>route.path.startsWith(prefix))?.[1]
