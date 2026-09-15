@@ -2,6 +2,7 @@ import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
 import { useAuth } from '../components/Auth'
 import { Button,ErrorBanner,Field,Input,Modal,Pill,SectionHeader,Select,Table } from '../components/UI'
+import { Icon } from '../components/Icons'
 
 const SCOPES={all:'Entire organisation',team:'Own work + reporting team',self:'Own work only',assigned:'Assigned work only'}
 const REGIONS=['North America','Europe','APAC','Middle East','Africa','Latin America','Global','USA','UK','India','Germany','France','Australia','Canada','Japan','Singapore','UAE','Brazil','South Korea','China','Mexico','Netherlands','Sweden','Norway','Switzerland','Italy','Spain','Ireland','Israel','New Zealand','South Africa','Saudi Arabia','Qatar','Poland','Denmark','Finland','Belgium','Austria','Portugal','Czech Republic','Thailand','Malaysia','Indonesia','Philippines','Vietnam','Colombia','Argentina','Chile','Peru','Egypt','Nigeria','Kenya','Morocco','Turkey','Russia','Taiwan','Hong Kong']
@@ -58,7 +59,12 @@ export default function AdminPage({onToast}){
  const deleteRole=async r=>{if(!window.confirm(`Delete the ${r.name} role?`))return;try{await api.delete(`/api/admin/roles/${r.id}`);onToast?.({message:`Role ${r.name} deleted`});load()}catch(err){fail(err)}}
 
  const catTone=c=>c==='Business Development'?'info':c==='Presales'?'warning':c==='Account Management'?'success':'neutral'
- const userCols=[{key:'name',label:'User',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.email}</span></div>},{key:'role',label:'Role'},{key:'category',label:'Category',render:r=>r.category?<Pill tone={catTone(r.category)}>{r.category}</Pill>:<span style={{color:'var(--muted)'}}>—</span>},{key:'title',label:'Title'},{key:'manager_name',label:'Reporting manager',render:r=>r.manager_name||'—'},{key:'region',label:'Region'},{key:'active',label:'Status',render:r=><Pill tone={r.active?'success':'neutral'}>{r.active?'Active':'Inactive'}</Pill>},{key:'edit',label:'',render:r=>(isSuper||r.id!==user.id)&&<Button variant="text" onClick={()=>openEditUser(r)}>Edit</Button>}]
+ const deactivateUser=async r=>{
+  const action=r.active?'Deactivate':'Activate'
+  if(!window.confirm(`${action} user "${r.name}"?`))return
+  try{await api.put(`/api/users/${r.id}`,{active:!r.active});onToast?.({message:`${r.name} ${r.active?'deactivated':'activated'}`});load()}catch(err){fail(err)}
+ }
+ const userCols=[{key:'name',label:'User',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.email}</span></div>},{key:'role',label:'Role'},{key:'category',label:'Category',render:r=>r.category?<Pill tone={catTone(r.category)}>{r.category}</Pill>:<span style={{color:'var(--muted)'}}>—</span>},{key:'title',label:'Title'},{key:'manager_name',label:'Reporting manager',render:r=>r.manager_name||'—'},{key:'region',label:'Region'},{key:'active',label:'Status',render:r=><Pill tone={r.active?'success':'neutral'}>{r.active?'Active':'Inactive'}</Pill>},{key:'actions',label:'',render:r=>(isSuper||r.id!==user.id)?<div className="row-actions"><button className="icon-btn" title="Edit" onClick={()=>openEditUser(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title={r.active?'Deactivate':'Activate'} onClick={()=>deactivateUser(r)}><Icon name={r.active?'trash':'check'} size={16}/></button></div>:null}]
  const roleCols=[{key:'name',label:'Role',render:r=><div className="primary-cell"><strong>{r.name}</strong><span>{r.user_count} {r.user_count===1?'user':'users'}{r.created_by==null?' · shared':''}</span></div>},{key:'scope_type',label:'Can see',render:r=>SCOPES[r.scope_type]||r.scope_type},{key:'rank',label:'Level',align:'right'},{key:'permissions',label:'Permissions',align:'right',render:r=>r.permissions.length},{key:'actions',label:'',render:r=>r.editable?<div style={{display:'flex',gap:4,justifyContent:'flex-end'}}><Button variant="text" onClick={()=>openEditRole(r)}>Edit</Button><Button variant="text" onClick={()=>deleteRole(r)} disabled={r.user_count>0} title={r.user_count>0?'Move its users to another role first':''}>Delete</Button></div>:<Pill>Protected</Pill>}]
  const editedUser=users.find(x=>x.id===userForm.id)
  const roleOptions=editedUser&&!assignable.some(r=>r.name===editedUser.role)?[{name:editedUser.role,locked:true},...assignable]:assignable
