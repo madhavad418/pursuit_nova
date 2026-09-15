@@ -29,10 +29,10 @@
 /* KPI Tracker */
 /* Prospect Map */
 .pmap-wrap{position:relative;z-index:1;isolation:isolate;border-radius:16px;padding:1px;background:linear-gradient(140deg,rgba(0,212,255,.5),rgba(0,80,169,.15) 45%,rgba(0,212,255,.35))}
-.pmap-canvas.leaflet-container{height:420px;width:100%;border-radius:15px;overflow:hidden;background:#021a3d;font-family:inherit}
+.pmap-canvas.leaflet-container{width:100%;aspect-ratio:1022/480;min-height:300px;border-radius:15px;overflow:hidden;background:#021a3d;font-family:inherit}
 .pmap-canvas .leaflet-interactive{outline:none}
 .pmap-dot,.pmap-continent{background:transparent!important;border:0!important}
-.pmap-marker{display:block;box-sizing:border-box;border-radius:50%;background:#22c9f0;border:2px solid #fff;box-shadow:0 0 9px 2px rgba(0,212,255,.6)}
+.pmap-marker{display:block;box-sizing:border-box;border-radius:50%;background:#22c9f0;border:2.5px solid #fff;box-shadow:0 0 10px 2px rgba(0,212,255,.6)}
 .pmap-continent{display:flex!important;align-items:center;justify-content:center;text-align:center;color:rgba(255,255,255,.78);font-size:12px;font-weight:600;letter-spacing:.12em;line-height:1.15;pointer-events:none;text-shadow:0 1px 3px rgba(2,26,61,.9)}
 /* Top-left info overlay */
 .pmap-info{position:absolute;top:17px;left:17px;z-index:500;pointer-events:none;background:rgba(1,47,98,.7);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:12px 16px}

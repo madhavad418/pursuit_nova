@@ -29,7 +29,7 @@ const GEO={
   'North America':[39.8,-98.6],'Europe':[50.1,9.7],'APAC':[20.0,100.0],
   'Middle East':[25.0,45.0],'Africa':[0.0,25.0],'Latin America':[-15.0,-60.0],
 }
-const CONTINENTS=[['NORTH AMERICA',[45,-102]],['SOUTH AMERICA',[-18,-60]],['EUROPE',[50,15]],['AFRICA',[5,20]],['ASIA',[48,90]],['AUSTRALIA',[-25,134]]]
+const CONTINENTS=[['NORTH AMERICA',[45,-102]],['SOUTH AMERICA',[-18,-60]],['EUROPE',[50,15]],['AFRICA',[5,20]],['ASIA',[48,90]],['AUSTRALIA',[-38,134]]]
 const HQ=[51.49,-0.31] // JSAN Global Headquarters, Brentford UK (same hub as the jsan.com contact map)
 
 // Free-text country/city values -> Natural Earth country names used by world-atlas
@@ -113,7 +113,7 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     const active=new Set(Object.keys(byCountry))
     L.geoJSON(LAND,{interactive:false,style:f=>active.has(f.properties?.name)
       ?{fillColor:'#164a82',fillOpacity:1,color:'#4f7fb3',weight:0.6,opacity:0.7}
-      :{fillColor:'#062452',fillOpacity:1,color:'#8fb0d6',weight:0.5,opacity:0.32}}).addTo(map)
+      :{fillColor:'#021a3d',fillOpacity:1,color:'#9db8d9',weight:0.5,opacity:0.3}}).addTo(map)
 
     CONTINENTS.forEach(([name,pos])=>L.marker(pos,{interactive:false,icon:L.divIcon({className:'pmap-continent',html:name.replace(' ','<br>'),iconSize:[120,40],iconAnchor:[60,20]})}).addTo(map))
 
@@ -129,14 +129,14 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     })
 
     points.forEach(p=>{
-      const size=13 // uniform markers, as in the reference
+      const size=15 // uniform markers, as in the reference
       L.marker([p.lat,p.lng],{icon:L.divIcon({className:'pmap-dot',html:dotHtml(size),iconSize:[size,size],iconAnchor:[size/2,size/2]})})
         .addTo(map)
         .bindTooltip(`<strong>${p.country}</strong><br/>${p.leads} prospect${p.leads!==1?'s':''} · ${p.opportunities} opportunit${p.opportunities!==1?'ies':'y'}`,{className:'pmap-tip',direction:'top',offset:[0,-8]})
     })
 
     if(points.length){
-      L.marker(HQ,{icon:L.divIcon({className:'pmap-dot',html:dotHtml(13),iconSize:[13,13],iconAnchor:[6.5,6.5]})})
+      L.marker(HQ,{icon:L.divIcon({className:'pmap-dot',html:dotHtml(15),iconSize:[15,15],iconAnchor:[7.5,7.5]})})
         .addTo(map).bindTooltip('<strong>JSAN Global HQ</strong><br/>Brentford, UK',{className:'pmap-tip',direction:'top',offset:[0,-8]})
       // Whole world by default (as in the reference); zoom to the prospects only when a region is filtered
       if(focus) map.fitBounds(L.latLngBounds(points.map(p=>[p.lat,p.lng])),{padding:[90,90],maxZoom:4})
