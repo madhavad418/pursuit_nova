@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, insert, update, delete, func, and_, or_, text, inspect
+from sqlalchemy import select, insert, update, delete, func, and_, or_, text, inspect, case
 from sqlalchemy.exc import IntegrityError
 
 # Optional OpenTelemetry export. Set OTEL_EXPORTER_OTLP_ENDPOINT in production.
@@ -1321,14 +1321,26 @@ def query_companies(q:str="",vertical:str="",region:str="",page:int=1,page_size:
     return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"summary":totals}
 
 @app.get("/api/query/leads")
-def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None,page:int=1,page_size:int=25,u=Depends(require_perm("LEAD_VIEW"))):
+def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None,region:str="",followup:str="",sort:str="",dir:str="asc",page:int=1,page_size:int=25,u=Depends(require_perm("LEAD_VIEW"))):
     page=max(1,page); page_size=min(max(1,page_size),100); owner=users.alias("owner")
     primary=select(contacts.c.name).where(and_(contacts.c.company_id==leads.c.company_id,contacts.c.active==True)).order_by(contacts.c.is_primary.desc(),contacts.c.id).limit(1).correlate(leads).scalar_subquery()
-    base=select(leads,companies.c.name.label("company_name"),companies.c.vertical,owner.c.name.label("owner_name"),primary.label("primary_contact")).select_from(leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)).where(lead_visibility_condition(u))
+    joined=leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)
+    base=select(leads,companies.c.name.label("company_name"),companies.c.vertical,owner.c.name.label("owner_name"),primary.label("primary_contact")).select_from(joined).where(lead_visibility_condition(u))
     common=[]
     if q: common.append(or_(func.lower(companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(leads.c.remarks," ")).like(f"%{q.lower()}%"),func.lower(owner.c.name).like(f"%{q.lower()}%")))
     if status: common.append(leads.c.status==status)
     if owner_id: common.append(leads.c.owner_id==owner_id)
+    if region=="__none__": common.append(or_(leads.c.region.is_(None),leads.c.region==""))
+    elif region: common.append(leads.c.region==region)
+    t=today_str(); week=(date.today()+timedelta(days=7)).isoformat()
+    if followup=="overdue": common.append(and_(leads.c.next_follow_up.is_not(None),leads.c.next_follow_up!="",leads.c.next_follow_up<t))
+    elif followup=="today": common.append(leads.c.next_follow_up==t)
+    elif followup=="week": common.append(and_(leads.c.next_follow_up>=t,leads.c.next_follow_up<=week))
+    elif followup=="none": common.append(or_(leads.c.next_follow_up.is_(None),leads.c.next_follow_up==""))
+    # Filter options come from every visible lead, so the menus don't shrink as filters are applied
+    facet_rows=rows(select(leads.c.region,leads.c.owner_id,owner.c.name.label("owner_name")).select_from(joined).where(lead_visibility_condition(u)).distinct())
+    facets={"regions":sorted({r["region"] for r in facet_rows if r["region"]},key=str.lower),
+            "owners":sorted([{"id":oid,"name":n} for oid,n in {(r["owner_id"],r["owner_name"]) for r in facet_rows}],key=lambda x:(x["name"] or "").lower())}
     if common: base=base.where(*common)
     summary_stmt=select(leads.c.temperature,func.count(leads.c.id).label("count")).select_from(leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)).where(lead_visibility_condition(u),*common).group_by(leads.c.temperature)
     temp_counts={r["temperature"]:r["count"] for r in rows(summary_stmt)}
@@ -1336,8 +1348,20 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
     overdue=(row(overdue_stmt) or {}).get("count",0)
     if temperature: base=base.where(leads.c.temperature==temperature)
     nrow=row(select(func.count().label("total")).select_from(base.subquery())); n=int((nrow or {}).get("total",0))
-    items=rows(base.order_by(leads.c.updated_at.desc()).offset((page-1)*page_size).limit(page_size))
-    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
+    # Whitelisted sort keys only; never pass user input into ORDER BY
+    temp_rank=case((leads.c.temperature=="Hot",0),(leads.c.temperature=="Warm",1),(leads.c.temperature=="Cold",2),else_=3)
+    sort_cols={"company_name":func.lower(companies.c.name),"temperature":temp_rank,"status":func.lower(leads.c.status),
+               "owner_name":func.lower(owner.c.name),"next_follow_up":leads.c.next_follow_up,"region":func.lower(func.coalesce(leads.c.region,""))}
+    order=[]
+    if sort in sort_cols:
+        col=sort_cols[sort]
+        if sort in ("next_follow_up","region"):  # empty values always last
+            empty=or_(leads.c.next_follow_up.is_(None),leads.c.next_follow_up=="") if sort=="next_follow_up" else or_(leads.c.region.is_(None),leads.c.region=="")
+            order.append(case((empty,1),else_=0))
+        order.append(col.desc() if dir=="desc" else col.asc())
+    order.append(leads.c.updated_at.desc())
+    items=rows(base.order_by(*order).offset((page-1)*page_size).limit(page_size))
+    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"facets":facets,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
 
 @app.get("/api/query/opportunities")
 def query_opportunities(q:str="",status:str="",forecast_category:str="",owner_id:int|None=None,page:int=1,page_size:int=25,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
