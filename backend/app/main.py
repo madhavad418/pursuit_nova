@@ -518,8 +518,9 @@ def update_user(user_id:int,p:Payload,u=Depends(require_csrf)):
     if "USER_ADMIN" not in u["permissions"]: raise HTTPException(403,"User administration permission required")
     if not is_super(u) and user_id not in managed_user_ids(u): raise HTTPException(403,"You can only manage users in your own hierarchy")
     d=p.data; vals={}
-    for k in (("name","manager_id","title","region","category","active") if _HAS_CATEGORY else ("name","manager_id","title","region","active")):
+    for k in (("name","email","manager_id","title","region","category","active") if _HAS_CATEGORY else ("name","email","manager_id","title","region","active")):
         if k in d: vals[k]=d[k] if d[k]!="" else None
+    if "email" in vals and vals["email"]: vals["email"]=vals["email"].strip().lower()
     if d.get("role"):
         rr=row(select(roles).where(roles.c.name==d["role"]))
         if not rr: raise HTTPException(400,"Invalid role")
