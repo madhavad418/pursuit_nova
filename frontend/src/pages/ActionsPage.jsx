@@ -15,6 +15,10 @@ const summarize=rows=>({total:rows.length,overdue:rows.filter(x=>x.overdue).leng
 function FilterSelect({value,onChange}){
  return <Select value={value} onChange={e=>onChange(e.target.value)} aria-label="Filter actions"><option value="all">All visible actions</option><option value="my">My actions</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="upcoming">Upcoming</option><option value="completed">Completed</option></Select>
 }
+// Column headings shared by both boards; widths come from .action-cols so every row lines up
+function BoardHeader({third}){
+ return <div className="action-cols action-head" role="row"><span role="columnheader">Priority</span><span role="columnheader">Action</span><span role="columnheader">{third}</span><span role="columnheader">Assigned to</span><span role="columnheader">Due</span><span role="columnheader">Status</span><span role="columnheader" className="align-end">Actions</span></div>
+}
 function Counts({counts}){
  return <div className="mini-kpis"><div><span>Open work</span><strong>{counts.open}</strong></div><div><span>Overdue</span><strong className="text-danger">{counts.overdue}</strong></div><div><span>Due today</span><strong>{counts.today}</strong></div><div><span>Visible actions</span><strong>{counts.total}</strong></div></div>
 }
@@ -35,7 +39,7 @@ function ProspectActions({onToast,filter,assignableUsers}){
  return <>
   <Counts counts={counts}/>
   <ErrorBanner error={error} onRetry={load}/>
-  <section className="panel"><div className="action-board">{rows.map(a=><div className={a.overdue?'action-board-row overdue':'action-board-row'} key={a.id}><span className={`priority priority-${String(a.priority).toLowerCase()}`}>{a.priority}</span><button className="action-link" onClick={()=>navigate(`lead/${a.lead_id}`)}><strong>{a.description}</strong><span>{a.company_name} · {a.assigned_to_name}</span></button><div className="action-due"><span>Due</span><strong className={a.overdue?'text-danger':''}>{dateText(a.due_date)}</strong></div><Pill tone={a.overdue?'danger':statusTone(a.status)}>{a.overdue?'Overdue':a.status}</Pill><div className="row-actions">{a.status!=='Completed'&&<Button variant="text" onClick={()=>update(a,'Completed')}>Complete</Button>}{a.status==='Open'&&<Button variant="text" onClick={()=>update(a,'In Progress')}>Start</Button>}{admin&&<><button className="icon-btn" title="Edit" onClick={()=>openEdit(a)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title="Delete" onClick={()=>deleteAction(a)}><Icon name="trash" size={16}/></button></>}</div></div>)}{!rows.length&&<Empty title="No actions in this view" text="You're clear for the selected filter."/>}</div></section>
+  <section className="panel action-panel"><div className="action-board" role="table">{rows.length>0&&<BoardHeader third="Company"/>}{rows.map(a=><div className={a.overdue?'action-cols action-row overdue':'action-cols action-row'} role="row" key={a.id}><span className={`priority priority-${String(a.priority).toLowerCase()}`} data-label="Priority">{a.priority}</span><button className="action-link" onClick={()=>navigate(`lead/${a.lead_id}`)} title={a.description}><strong>{a.description}</strong>{a.remarks&&<span>{a.remarks}</span>}</button><span className="action-cell" data-label="Company">{a.company_name}</span><span className="action-cell" data-label="Assigned to">{a.assigned_to_name}</span><span className={a.overdue?'action-cell action-date text-danger':'action-cell action-date'} data-label="Due">{dateText(a.due_date)}</span><span className="action-cell" data-label="Status"><Pill tone={a.overdue?'danger':statusTone(a.status)}>{a.overdue?'Overdue':a.status}</Pill></span><div className="action-buttons">{a.status!=='Completed'?<Button variant="text" onClick={()=>update(a,'Completed')}>Complete</Button>:<span className="slot" aria-hidden="true"/>}{a.status==='Open'?<Button variant="text" onClick={()=>update(a,'In Progress')}>Start</Button>:<span className="slot" aria-hidden="true"/>}{admin?<button className="icon-btn" title="Edit" aria-label="Edit action" onClick={()=>openEdit(a)}><Icon name="edit" size={16}/></button>:<span className="slot" aria-hidden="true"/>}{admin?<button className="icon-btn text-danger" title="Delete" aria-label="Delete action" onClick={()=>deleteAction(a)}><Icon name="trash" size={16}/></button>:<span className="slot" aria-hidden="true"/>}</div></div>)}{!rows.length&&<Empty title="No actions in this view" text="You're clear for the selected filter."/>}</div></section>
   <Modal open={editOpen} onClose={()=>setEditOpen(false)} title="Edit action" eyebrow={editForm.company_name}><form onSubmit={saveEdit}>
    <div className="form-grid">
     <Field label="Description" className="span-2"><Textarea required value={editForm.description||''} onChange={e=>setE('description',e.target.value)}/></Field>
@@ -80,20 +84,23 @@ function GenericActions({onToast,filter,assignableUsers,createSignal}){
  return <>
   <Counts counts={counts}/>
   <ErrorBanner error={error} onRetry={load}/>
-  <section className="panel"><div className="action-board">
-   {rows.map(a=><div className={a.overdue?'action-board-row overdue':'action-board-row'} key={a.id}>
-    <span className={`priority priority-${String(a.priority).toLowerCase()}`}>{a.priority}</span>
-    <button className="action-link" onClick={()=>setViewing(a)}>
+  <section className="panel action-panel"><div className="action-board" role="table">
+   {rows.length>0&&<BoardHeader third="Type"/>}
+   {rows.map(a=><div className={a.overdue?'action-cols action-row overdue':'action-cols action-row'} role="row" key={a.id}>
+    <span className={`priority priority-${String(a.priority).toLowerCase()}`} data-label="Priority">{a.priority}</span>
+    <button className="action-link" onClick={()=>setViewing(a)} title={a.title}>
      <strong>{a.title}</strong>
-     <span><span className="generic-type">{a.action_type}</span> · {a.assigned_to_name}{a.created_by!==a.assigned_to?` · by ${a.created_by_name}`:''}</span>
+     {a.created_by!==a.assigned_to&&<span>Created by {a.created_by_name}</span>}
     </button>
-    <div className="action-due"><span>Due</span><strong className={a.overdue?'text-danger':''}>{dateText(a.due_date)}</strong></div>
-    <Pill tone={a.overdue?'danger':statusTone(a.status)}>{a.overdue?'Overdue':a.status}</Pill>
-    <div className="row-actions">
-     {a.can_edit&&a.status!=='Completed'&&a.status!=='Cancelled'&&<Button variant="text" onClick={()=>update(a,'Completed')}>Complete</Button>}
-     {a.can_edit&&a.status==='Open'&&<Button variant="text" onClick={()=>update(a,'In Progress')}>Start</Button>}
-     {a.can_edit&&<button className="icon-btn" title="Edit" aria-label="Edit action" onClick={()=>openEdit(a)}><Icon name="edit" size={16}/></button>}
-     {a.can_delete&&<button className="icon-btn text-danger" title="Delete" aria-label="Delete action" onClick={()=>remove(a)}><Icon name="trash" size={16}/></button>}
+    <span className="action-cell" data-label="Type"><span className="generic-type">{a.action_type}</span></span>
+    <span className="action-cell" data-label="Assigned to">{a.assigned_to_name}</span>
+    <span className={a.overdue?'action-cell action-date text-danger':'action-cell action-date'} data-label="Due">{dateText(a.due_date)}</span>
+    <span className="action-cell" data-label="Status"><Pill tone={a.overdue?'danger':statusTone(a.status)}>{a.overdue?'Overdue':a.status}</Pill></span>
+    <div className="action-buttons">
+     {a.can_edit&&a.status!=='Completed'&&a.status!=='Cancelled'?<Button variant="text" onClick={()=>update(a,'Completed')}>Complete</Button>:<span className="slot" aria-hidden="true"/>}
+     {a.can_edit&&a.status==='Open'?<Button variant="text" onClick={()=>update(a,'In Progress')}>Start</Button>:<span className="slot" aria-hidden="true"/>}
+     {a.can_edit?<button className="icon-btn" title="Edit" aria-label="Edit action" onClick={()=>openEdit(a)}><Icon name="edit" size={16}/></button>:<span className="slot" aria-hidden="true"/>}
+     {a.can_delete?<button className="icon-btn text-danger" title="Delete" aria-label="Delete action" onClick={()=>remove(a)}><Icon name="trash" size={16}/></button>:<span className="slot" aria-hidden="true"/>}
     </div>
    </div>)}
    {!rows.length&&<Empty title="No generic actions in this view" text={data.can_create?'Create one for work like PPT or summit preparation.':"You're clear for the selected filter."}/>}

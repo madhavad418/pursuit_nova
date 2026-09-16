@@ -83,6 +83,35 @@
 .docx-viewer .docx-wrapper{background:transparent;padding:20px}
 .docx-viewer .docx-wrapper>section.docx{box-shadow:0 2px 12px rgba(24,62,83,.15);margin-bottom:20px}
 @media(max-width:760px){.docx-viewer .docx-wrapper{padding:8px}.docx-viewer .docx-wrapper>section.docx{padding:24px!important;width:100%!important;min-height:auto!important}}
+/* Action boards: fixed columns with headings so rows line up */
+.action-panel{padding:6px 20px 12px}
+.action-cols{display:grid;grid-template-columns:84px minmax(180px,2.2fr) minmax(120px,1.3fr) minmax(120px,1.1fr) 104px 112px 250px;align-items:center;column-gap:18px}
+.action-head{padding:12px 10px;border-bottom:1px solid var(--line);font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.action-head .align-end{text-align:right}
+.action-row{padding:14px 10px;border-bottom:1px solid #edf3f6;min-height:62px}
+.action-row:last-child{border-bottom:0}
+.action-row:hover{background:#f9fcfd}
+.action-row.overdue{background:linear-gradient(90deg,#fff4f4,transparent 65%)}
+.action-row .priority{font-size:10px}
+.action-row .action-link{min-width:0;padding:0;gap:4px}
+.action-row .action-link strong{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.action-row .action-link span{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.action-row .action-link:hover strong{color:var(--brand)}
+.action-cell{min-width:0;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.action-date{font-weight:600}
+.action-row .generic-type{padding:3px 8px;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.action-buttons{display:grid;grid-template-columns:88px 52px 36px 36px;align-items:center;justify-items:center;justify-content:end;column-gap:4px}
+.action-buttons .slot{width:1px;height:1px}
+@media(max-width:1280px){.action-cols{grid-template-columns:72px minmax(160px,2fr) minmax(100px,1.2fr) minmax(100px,1fr) 96px 104px 220px;column-gap:12px}}
+@media(max-width:1024px){
+ .action-head{display:none}
+ .action-cols{grid-template-columns:1fr auto;row-gap:6px}
+ .action-row .priority{grid-column:1/-1}
+ .action-row .action-link{grid-column:1/-1}
+ .action-row .action-cell{grid-column:1/-1;display:flex;gap:8px;white-space:normal}
+ .action-row .action-cell::before{content:attr(data-label);min-width:88px;font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted)}
+ .action-row .action-buttons{grid-column:1/-1;justify-content:start}
+}
 /* Generic actions */
 .section-actions .segmented{margin-bottom:0;flex:none}
 .segmented button,.section-actions .btn,.section-actions select{white-space:nowrap}
