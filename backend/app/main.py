@@ -339,11 +339,6 @@ def can_view_opp(u, opp_id: int) -> bool:
 def can_edit_opp(u, opp_id: int) -> bool:
     return "OPPORTUNITY_EDIT" in u["permissions"] and can_view_opp(u, opp_id)
 
-def can_edit_company_relationship(u, company_id: int) -> bool:
-    """Changing company identity or contacts needs edit rights on one of its prospects (or organisation-wide scope)."""
-    if u.get("scope_type") == "all": return True
-    return any(can_edit_lead(u, lr["id"]) for lr in rows(select(leads.c.id).where(leads.c.company_id==company_id)))
-
 def _clean_text(v, max_len=None):
     if v is None: return None
     t=str(v).strip()
@@ -720,7 +715,7 @@ def company_detail(company_id:int,u=Depends(require_perm("COMPANY_VIEW"))):
 def update_company(company_id:int,p:Payload,u=Depends(require_csrf)):
     if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403,"Company edit permission required")
     if not row(select(companies.c.id).where(companies.c.id==company_id)): raise HTTPException(404,"Company not found")
-    if not can_edit_company_relationship(u,company_id): raise HTTPException(403,"Company relationship edit denied")
+    if not can_access_company_relationship(u,company_id): raise HTTPException(403,"Company relationship edit denied")
     d=p.data; vals={k:d[k] for k in ("name","vertical","website","linkedin_url","external_url","region","country","state","city","remarks","status") if k in d}
     for k in ("name","vertical"):
         if k in vals:
@@ -753,7 +748,7 @@ def update_contact(contact_id:int,p:Payload,u=Depends(require_csrf)):
     if "CONTACT_EDIT" not in u["permissions"]: raise HTTPException(403,"Contact edit permission required")
     cr=row(select(contacts.c.company_id).where(contacts.c.id==contact_id))
     if not cr: raise HTTPException(404,"Contact not found")
-    if not can_edit_company_relationship(u,int(cr["company_id"])): raise HTTPException(403,"Contact relationship access denied")
+    if not can_access_company_relationship(u,int(cr["company_id"])): raise HTTPException(403,"Contact relationship access denied")
     d=p.data; ensure_fields_editable(u,"contact",d); vals={k:d[k] for k in ("name","designation","department","email","phone","linkedin_url","location","remarks","is_primary","active") if k in d}
     if "name" in vals:
         vals["name"]=_clean_text(vals["name"],180)
@@ -840,8 +835,14 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     for o in opps: timeline.append({"date":str(o["created_at"])[:10],"type":"Opportunity","title":o["name"],"detail":f"{o['status']} · {o['forecast_category']}"})
     for f in fs: timeline.append({"date":f["follow_up_date"],"type":"Follow-up","title":f["opportunity_name"],"detail":f.get("response") or f.get("remarks")})
     timeline.sort(key=lambda x:x["date"] or "",reverse=True)
+    # Role rules (unchanged from before the edit form existed):
+    #  prospect fields  -> LEAD_EDIT and the owner is in the user's scope (or shared with edit access)
+    #  owner            -> also LEAD_REASSIGN
+    #  company/contacts -> COMPANY_EDIT / CONTACT_EDIT and the user can see a prospect of that company
+    #  delete           -> Super Admin or Admin who can edit the prospect
     editable=can_edit_lead(u,lead_id)
-    perms={"can_edit":editable,"can_edit_company":editable and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":editable and "CONTACT_EDIT" in u["permissions"],
+    related=can_access_company_relationship(u,l["company_id"])
+    perms={"can_edit":editable,"can_edit_company":related and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":related and "CONTACT_EDIT" in u["permissions"],
            "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_delete":editable and u["role"] in ("Super Admin","Admin")}
     return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
 

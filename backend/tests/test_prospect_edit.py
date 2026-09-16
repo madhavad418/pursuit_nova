@@ -77,12 +77,17 @@ def test_contacts_can_be_edited_and_removed(client, login, csrf_headers):
     assert 'Tom Hale' not in [c['name'] for c in client.get(f'/api/leads/{lid}').json()['contacts']]
 
 
-def test_edit_rights_follow_hierarchy(client, login, csrf_headers):
+def test_edit_rights_follow_role_rules(client, login, csrf_headers):
     owner = _as(client, login, EXEC1)
     detail = _own_lead(client, owner)
-    lid, cid, contact_id = detail['lead']['id'], detail['lead']['company_id'], detail['contacts'][0]['id']
+    lid, cid = detail['lead']['id'], detail['lead']['company_id']
+    contact_id = client.post(f'/api/companies/{cid}/contacts', json={'data': {'name': 'Role Rules Contact', 'email': 'role.rules@northstar.example'}}, headers=csrf_headers(client)).json()['id']
+    # BD Executive: edits own prospect, company and contacts, but cannot reassign
+    perms = client.get(f'/api/leads/{lid}').json()['permissions']
+    assert perms['can_edit'] and perms['can_edit_company'] and perms['can_edit_contacts'] and not perms['can_reassign'] and not perms['can_delete']
+    assert client.put(f'/api/leads/{lid}', json={'data': {'owner_id': owner['id']}}, headers=csrf_headers(client)).status_code == 403
 
-    # A peer cannot change anything on someone else's prospect
+    # A peer who cannot see the prospect cannot change anything
     _as(client, login, EXEC2)
     h = csrf_headers(client)
     assert client.put(f'/api/leads/{lid}', json={'data': {'remarks': 'x'}}, headers=h).status_code == 403
@@ -90,14 +95,30 @@ def test_edit_rights_follow_hierarchy(client, login, csrf_headers):
     assert client.put(f'/api/contacts/{contact_id}', json={'data': {'phone': '1'}}, headers=h).status_code == 403
     assert all(not i['can_edit'] for i in client.get('/api/query/leads', params={'page_size': 100}).json()['items'] if i['owner_id'] == owner['id'])
 
-    # Their manager can, and the list says so
+    # BD Lead (manager): edits and reassigns team prospects, cannot delete
     _as(client, login, LEAD)
     items = {i['id']: i for i in client.get('/api/query/leads', params={'page_size': 100}).json()['items']}
     assert items[lid]['can_edit']
-    assert client.put(f'/api/companies/{cid}', json={'data': {'remarks': 'Strategic account'}}, headers=csrf_headers(client)).status_code == 200
-    assert not client.get(f'/api/leads/{lid}').json()['permissions']['can_delete']
+    perms = client.get(f'/api/leads/{lid}').json()['permissions']
+    assert perms['can_edit'] and perms['can_reassign'] and perms['can_edit_company'] and not perms['can_delete']
+    h = csrf_headers(client)
+    assert client.put(f'/api/companies/{cid}', json={'data': {'remarks': 'Strategic account'}}, headers=h).status_code == 200
+    assert client.put(f'/api/leads/{lid}', json={'data': {'owner_id': owner['id'], 'status': 'Qualified'}}, headers=h).status_code == 200
 
-    # Super Admin can edit and delete
+    # Presales Lead who can see the prospect through an assigned action: view only
+    _as(client, login, SUPER)
+    presales = next(u for u in client.get('/api/users').json() if u['email'] == 'presales@jsan.local')
+    assert client.post(f'/api/leads/{lid}/actions', json={'data': {'description': 'Technical note', 'due_date': '2026-12-01', 'assigned_to': presales['id']}}, headers=csrf_headers(client)).status_code == 200
+    _as(client, login, 'presales@jsan.local')
+    h = csrf_headers(client)
+    assert client.get(f'/api/leads/{lid}').status_code == 200
+    perms = client.get(f'/api/leads/{lid}').json()['permissions']
+    assert not any(perms[k] for k in ('can_edit', 'can_edit_company', 'can_edit_contacts', 'can_reassign', 'can_delete'))
+    assert client.put(f'/api/leads/{lid}', json={'data': {'remarks': 'x'}}, headers=h).status_code == 403
+    assert client.put(f'/api/companies/{cid}', json={'data': {'remarks': 'x'}}, headers=h).status_code == 403
+    assert client.put(f'/api/contacts/{contact_id}', json={'data': {'designation': 'x'}}, headers=h).status_code == 403
+
+    # Super Admin: everything, including delete
     _as(client, login, SUPER)
     perms = client.get(f'/api/leads/{lid}').json()['permissions']
-    assert perms['can_edit'] and perms['can_delete'] and perms['can_reassign']
+    assert perms['can_edit'] and perms['can_reassign'] and perms['can_edit_company'] and perms['can_edit_contacts'] and perms['can_delete']
