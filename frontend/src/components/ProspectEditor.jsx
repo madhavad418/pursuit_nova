@@ -5,8 +5,6 @@ import { Button,Field,Input,Modal,Select,Spinner,Textarea } from './UI'
 export const LEAD_STATUSES=['New','Assigned','Contacted','Engaged','Qualified','Converted','On Hold','Unresponsive','Disqualified','Lost']
 export const LEAD_SOURCES=['LinkedIn','Referral','Event','Conference','Website','Existing Customer','Partner','Management Reference','Outbound','RFP / Tender','Other']
 
-const COMPANY_FIELDS=['name','vertical','website','linkedin_url','external_url','company_remarks']
-const LEAD_FIELDS=['owner_id','temperature','status','source','source_detail','region','country','state','city','next_follow_up','remarks']
 const str=v=>v==null?'':String(v)
 
 // Only send what actually changed, so saving never overwrites a field the user did not touch.
@@ -16,26 +14,41 @@ const changed=(form,orig,keys)=>Object.fromEntries(keys.filter(k=>str(form[k]).t
  * Full prospect editor: company identity and links plus every prospect field.
  * Opens on a lead id, loads the latest data, and saves company and prospect changes separately.
  */
-export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
+// Which fields each entry point edits, in display order.
+//  list     -> Prospects tab row edit icon
+//  overview -> prospect page "Edit prospect" (matches the Overview columns: Company, Vertical, Owner, Source, Geography, Remarks)
+export const EDITOR_FIELDS={
+ list:['temperature','status','owner_id','next_follow_up','region','country','state','city','remarks'],
+ overview:['name','vertical','owner_id','source','source_detail','city','state','country','remarks'],
+}
+const COMPANY_KEYS=new Set(['name','vertical'])
+
+/**
+ * Prospect editor. `variant` picks the field set (see EDITOR_FIELDS). Loads the latest data on open,
+ * sends only changed fields, and locks what the user's role cannot change.
+ */
+export function ProspectEditor({leadId,open,onClose,onSaved,onToast,variant='list'}){
  const [detail,setDetail]=useState(null); const [form,setForm]=useState(null); const [users,setUsers]=useState([]); const [saving,setSaving]=useState(false); const [error,setError]=useState('')
+ const keys=EDITOR_FIELDS[variant]||EDITOR_FIELDS.list
  useEffect(()=>{
   if(!open||!leadId)return
   let live=true; setDetail(null); setForm(null); setError('')
   Promise.all([api.get(`/api/leads/${leadId}`),api.get('/api/users/assignable').catch(()=>[])]).then(([d,u])=>{
    if(!live)return
-   const l=d.lead; const orig={name:l.company_name,vertical:l.vertical,website:l.website,linkedin_url:l.linkedin_url,external_url:l.external_url,company_remarks:l.company_remarks,owner_id:String(l.owner_id),temperature:l.temperature,status:l.status,source:l.source,source_detail:l.source_detail,region:l.region,country:l.country,state:l.state,city:l.city,next_follow_up:l.next_follow_up,remarks:l.remarks}
+   const l=d.lead; const orig={name:l.company_name,vertical:l.vertical,owner_id:String(l.owner_id),temperature:l.temperature,status:l.status,source:l.source,source_detail:l.source_detail,region:l.region,country:l.country,state:l.state,city:l.city,next_follow_up:l.next_follow_up,remarks:l.remarks}
    setDetail({...d,orig}); setForm(Object.fromEntries(Object.entries(orig).map(([k,v])=>[k,str(v)]))); setUsers(u)
   }).catch(e=>live&&setError(e.message))
   return()=>{live=false}
  },[open,leadId])
  const set=(k,v)=>setForm(f=>({...f,[k]:v}))
  const perms=detail?.permissions||{}
+ const locked=k=>COMPANY_KEYS.has(k)?!perms.can_edit_company:k==='owner_id'?!perms.can_reassign:!perms.can_edit
+ const canSave=keys.some(k=>!locked(k))
  const save=async e=>{
   e.preventDefault(); if(!detail)return
-  const companyChanges=perms.can_edit_company?changed(form,detail.orig,COMPANY_FIELDS):{}
-  if('company_remarks' in companyChanges){companyChanges.remarks=companyChanges.company_remarks;delete companyChanges.company_remarks}
-  const leadChanges=perms.can_edit?changed(form,detail.orig,LEAD_FIELDS):{}
-  if(!perms.can_reassign)delete leadChanges.owner_id
+  const editable=keys.filter(k=>!locked(k))
+  const companyChanges=changed(form,detail.orig,editable.filter(k=>COMPANY_KEYS.has(k)))
+  const leadChanges=changed(form,detail.orig,editable.filter(k=>!COMPANY_KEYS.has(k)))
   if('owner_id' in leadChanges)leadChanges.owner_id=Number(leadChanges.owner_id)
   if(!Object.keys(companyChanges).length&&!Object.keys(leadChanges).length){onToast?.({message:'No changes to save'});onClose();return}
   setSaving(true)
@@ -50,34 +63,29 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
   }finally{setSaving(false)}
  }
  const ownerOptions=form&&!users.some(u=>String(u.id)===form.owner_id)?[{id:form.owner_id,name:detail?.lead.owner_name||'Current owner',role:'current'},...users]:users
- const ro=!perms.can_edit_company
- return <Modal open={open} onClose={onClose} title="Edit prospect" eyebrow={detail?.lead.company_name||'Loading…'} size="xl">
+ const input=(k,props={})=><Input disabled={locked(k)} value={form[k]} onChange={e=>set(k,e.target.value)} {...props}/>
+ const FIELDS={
+  name:()=> <Field key="name" label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>,
+  vertical:()=> <Field key="vertical" label="Vertical" required>{input('vertical',{required:true,maxLength:120,placeholder:'e.g. Telecommunications'})}</Field>,
+  owner_id:()=> <Field key="owner_id" label="Owner"><Select disabled={locked('owner_id')} value={form.owner_id} onChange={e=>set('owner_id',e.target.value)}>{ownerOptions.map(u=><option key={u.id} value={u.id}>{u.name}{u.role&&u.role!=='current'?` · ${u.role}`:''}</option>)}</Select></Field>,
+  temperature:()=> <Field key="temperature" label="Signal"><Select disabled={locked('temperature')} value={form.temperature} onChange={e=>set('temperature',e.target.value)}>{['Hot','Warm','Cold'].map(x=><option key={x}>{x}</option>)}</Select></Field>,
+  status:()=> <Field key="status" label="Status"><Select disabled={locked('status')} value={form.status} onChange={e=>set('status',e.target.value)}>{LEAD_STATUSES.map(x=><option key={x}>{x}</option>)}</Select></Field>,
+  source:()=> <Field key="source" label="Source"><Select disabled={locked('source')} value={form.source} onChange={e=>set('source',e.target.value)}>{(LEAD_SOURCES.includes(form.source)?LEAD_SOURCES:[form.source,...LEAD_SOURCES]).map(x=><option key={x}>{x}</option>)}</Select></Field>,
+  source_detail:()=> <Field key="source_detail" label="Source detail">{input('source_detail',{maxLength:255})}</Field>,
+  next_follow_up:()=> <Field key="next_follow_up" label="Next follow-up">{input('next_follow_up',{type:'date'})}</Field>,
+  region:()=> <Field key="region" label="Region">{input('region',{maxLength:80})}</Field>,
+  country:()=> <Field key="country" label="Country">{input('country',{maxLength:100})}</Field>,
+  state:()=> <Field key="state" label="State">{input('state',{maxLength:100})}</Field>,
+  city:()=> <Field key="city" label="City">{input('city',{maxLength:100})}</Field>,
+  remarks:()=> <Field key="remarks" label="Remarks" className="span-2"><Textarea disabled={locked('remarks')} value={form.remarks} onChange={e=>set('remarks',e.target.value)}/></Field>,
+ }
+ return <Modal open={open} onClose={onClose} title="Edit prospect" eyebrow={detail?.lead.company_name||'Loading…'} size="lg">
   {error&&<div className="error-banner"><div><strong>Could not load this prospect</strong><span>{error}</span></div></div>}
   {!form&&!error&&<Spinner label="Loading prospect"/>}
   {form&&<form onSubmit={save}>
-   {!perms.can_edit&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
-   <div className="form-section"><h3>Company</h3>{ro&&perms.can_edit&&<p className="subtle">Your role cannot change company details.</p>}<div className="form-grid">
-    <Field label="Company name" required><Input required maxLength={220} disabled={ro} value={form.name} onChange={e=>set('name',e.target.value)}/></Field>
-    <Field label="Vertical" required><Input required maxLength={120} disabled={ro} value={form.vertical} onChange={e=>set('vertical',e.target.value)} placeholder="e.g. Telecommunications"/></Field>
-    <Field label="Website"><Input disabled={ro} value={form.website} onChange={e=>set('website',e.target.value)} placeholder="https://company.com"/></Field>
-    <Field label="Company LinkedIn page"><Input disabled={ro} value={form.linkedin_url} onChange={e=>set('linkedin_url',e.target.value)} placeholder="https://linkedin.com/company/…"/></Field>
-    <Field label="Other link" hint="e.g. tender portal or article"><Input disabled={ro} value={form.external_url} onChange={e=>set('external_url',e.target.value)} placeholder="https://"/></Field>
-    <Field label="Company notes"><Input disabled={ro} value={form.company_remarks} onChange={e=>set('company_remarks',e.target.value)}/></Field>
-   </div></div>
-   <fieldset className="form-section plain-fieldset" disabled={!perms.can_edit}><h3>Prospect</h3><div className="form-grid">
-    <Field label="Owner" hint={perms.can_reassign?undefined:'Your role cannot reassign prospects.'}><Select disabled={!perms.can_reassign} value={form.owner_id} onChange={e=>set('owner_id',e.target.value)}>{ownerOptions.map(u=><option key={u.id} value={u.id}>{u.name}{u.role&&u.role!=='current'?` · ${u.role}`:''}</option>)}</Select></Field>
-    <Field label="Signal"><Select value={form.temperature} onChange={e=>set('temperature',e.target.value)}>{['Hot','Warm','Cold'].map(x=><option key={x}>{x}</option>)}</Select></Field>
-    <Field label="Status"><Select value={form.status} onChange={e=>set('status',e.target.value)}>{LEAD_STATUSES.map(x=><option key={x}>{x}</option>)}</Select></Field>
-    <Field label="Source"><Select value={form.source} onChange={e=>set('source',e.target.value)}>{(LEAD_SOURCES.includes(form.source)?LEAD_SOURCES:[form.source,...LEAD_SOURCES]).map(x=><option key={x}>{x}</option>)}</Select></Field>
-    <Field label="Source detail"><Input maxLength={255} value={form.source_detail} onChange={e=>set('source_detail',e.target.value)}/></Field>
-    <Field label="Next follow-up"><Input type="date" value={form.next_follow_up} onChange={e=>set('next_follow_up',e.target.value)}/></Field>
-    <Field label="Region"><Input maxLength={80} value={form.region} onChange={e=>set('region',e.target.value)}/></Field>
-    <Field label="Country"><Input maxLength={100} value={form.country} onChange={e=>set('country',e.target.value)}/></Field>
-    <Field label="State"><Input maxLength={100} value={form.state} onChange={e=>set('state',e.target.value)}/></Field>
-    <Field label="City"><Input maxLength={100} value={form.city} onChange={e=>set('city',e.target.value)}/></Field>
-    <Field label="Remarks" className="span-2"><Textarea value={form.remarks} onChange={e=>set('remarks',e.target.value)}/></Field>
-   </div></fieldset>
-   <div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>{(perms.can_edit||perms.can_edit_company)&&<Button type="submit" disabled={saving}>{saving?'Saving…':'Save changes'}</Button>}</div>
+   {!canSave&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
+   <div className="form-grid">{keys.map(k=>FIELDS[k]())}</div>
+   <div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>{canSave&&<Button type="submit" disabled={saving}>{saving?'Saving…':'Save changes'}</Button>}</div>
   </form>}
  </Modal>
 }
