@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@types/leaflet": "^1.9.22",
+    "docx-preview": "^0.4.0",
     "jspdf": "^4.2.1",
     "leaflet": "^1.9.4",
     "react": "^19.2.8",

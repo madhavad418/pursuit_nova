@@ -44,7 +44,7 @@ from app.db import (
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
     org_settings, fx_rates, field_permissions, saved_views, dashboard_preferences, microsoft_integrations,
-    kpi_templates, kpi_targets, kpi_actuals, generic_actions,
+    kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -771,6 +771,11 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     cts=[mask_fields(u,"contact",x) for x in rows(select(contacts).where(and_(contacts.c.company_id==l["company_id"],contacts.c.active==True)).order_by(contacts.c.is_primary.desc(),contacts.c.id))]
     mts=rows(select(meetings).where(meetings.c.lead_id==lead_id).order_by(meetings.c.meeting_date.desc(),meetings.c.id.desc()))
     ms=rows(select(moms).where(moms.c.lead_id==lead_id).order_by(moms.c.id.desc()))
+    att_by_mom={}
+    for a in rows(select(mom_attachments.c.id,mom_attachments.c.mom_id,mom_attachments.c.filename,mom_attachments.c.size_bytes,mom_attachments.c.uploaded_by,mom_attachments.c.created_at,users.c.name.label("uploaded_by_name")).select_from(mom_attachments.join(users,users.c.id==mom_attachments.c.uploaded_by)).where(mom_attachments.c.lead_id==lead_id).order_by(mom_attachments.c.id)):
+        a["can_delete"]=a["uploaded_by"]==u["id"] or u["role"] in ("Super Admin","Admin")
+        att_by_mom.setdefault(a["mom_id"],[]).append(a)
+    for mo in ms: mo["attachments"]=att_by_mom.get(mo["id"],[])
     aa=users.alias("aa")
     acts=rows(select(actions,aa.c.name.label("assigned_to_name")).select_from(actions.join(aa,aa.c.id==actions.c.assigned_to)).where(actions.c.lead_id==lead_id).order_by(actions.c.due_date,actions.c.id.desc()))
     for a in acts: a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<today_str()
@@ -812,6 +817,7 @@ def delete_lead(lead_id:int,u=Depends(require_csrf)):
         execute(delete(opportunity_team).where(opportunity_team.c.opportunity_id.in_(opp_ids)))
         execute(delete(opportunities).where(opportunities.c.lead_id==lead_id))
     execute(delete(actions).where(actions.c.lead_id==lead_id))
+    execute(delete(mom_attachments).where(mom_attachments.c.lead_id==lead_id))
     execute(delete(moms).where(moms.c.lead_id==lead_id))
     execute(delete(meetings).where(meetings.c.lead_id==lead_id))
     execute(delete(record_shares).where(and_(record_shares.c.entity_type=="lead",record_shares.c.entity_id==lead_id)))
@@ -845,6 +851,75 @@ def add_mom(lead_id:int,p:Payload,u=Depends(require_csrf)):
     mid=execute(insert(moms).values(meeting_id=d.get("meeting_id") or None,lead_id=lead_id,summary=d["summary"],customer_requirements=d.get("customer_requirements"),jsan_commitments=d.get("jsan_commitments"),customer_commitments=d.get("customer_commitments"),risks=d.get("risks"),next_steps=d.get("next_steps"),follow_up_date=d.get("follow_up_date"),created_by=u["id"]))
     if d.get("follow_up_date"): execute(update(leads).where(leads.c.id==lead_id).values(next_follow_up=d["follow_up_date"],updated_at=utcnow()))
     audit(u["id"],"mom",mid,"CREATE",d); return row(select(moms).where(moms.c.id==mid))
+
+# ── MoM Word attachments ──────────────────────────────────────────────────────
+DOCX_MIME="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MOM_ATTACHMENT_MAX_BYTES=10*1024*1024
+MOM_ATTACHMENT_MAX_UNZIPPED=100*1024*1024
+MOM_ATTACHMENTS_PER_MOM=10
+
+def _clean_filename(name:str)->str:
+    base=os.path.basename(str(name or "").replace("\\","/"))
+    base="".join(ch for ch in base if ch.isprintable() and ch not in '<>:"/\\|?*').strip(" .")
+    if len(base)>200:
+        stem,ext=os.path.splitext(base); base=stem[:200-len(ext)]+ext
+    return base or "minutes.docx"
+
+def _validate_docx(filename:str,data:bytes):
+    """Accept only a genuine, macro-free Word .docx: correct extension, zip signature, Word parts, sane unzipped size."""
+    if not filename.lower().endswith(".docx"): raise HTTPException(400,"Only Word .docx files can be attached")
+    if not data: raise HTTPException(400,"The file is empty")
+    if len(data)>MOM_ATTACHMENT_MAX_BYTES: raise HTTPException(413,"The file is larger than 10 MB")
+    if not data.startswith(b"PK\x03\x04"): raise HTTPException(400,"This file is not a valid Word .docx document")
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            infos=z.infolist()
+            names={i.filename for i in infos}
+            if sum(i.file_size for i in infos)>MOM_ATTACHMENT_MAX_UNZIPPED: raise HTTPException(400,"The document is too large once opened")
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names: raise HTTPException(400,"This file is not a valid Word .docx document")
+            if any(n.lower().endswith("vbaproject.bin") for n in names) or b"macroEnabled" in z.read("[Content_Types].xml"): raise HTTPException(400,"Macro-enabled Word documents are not allowed")
+    except HTTPException: raise
+    except Exception: raise HTTPException(400,"This file is not a valid Word .docx document")
+
+def _mom_for(u,mom_id:int):
+    m=row(select(moms.c.id,moms.c.lead_id).where(moms.c.id==mom_id))
+    if not m or not can_view_lead(u,m["lead_id"]): raise HTTPException(404,"Minutes of Meeting not found")
+    return m
+
+@app.post("/api/moms/{mom_id}/attachments")
+def upload_mom_attachment(mom_id:int,file:UploadFile=File(...),u=Depends(require_csrf)):
+    if "MEETING_EDIT" not in u["permissions"]: raise HTTPException(403,"MoM permission denied")
+    m=_mom_for(u,mom_id)
+    count=(row(select(func.count().label("n")).select_from(mom_attachments).where(mom_attachments.c.mom_id==mom_id)) or {}).get("n",0)
+    if count>=MOM_ATTACHMENTS_PER_MOM: raise HTTPException(400,f"A MoM can have at most {MOM_ATTACHMENTS_PER_MOM} attachments")
+    data=file.file.read(MOM_ATTACHMENT_MAX_BYTES+1)
+    filename=_clean_filename(file.filename)
+    _validate_docx(filename,data)
+    digest=hashlib.sha256(data).hexdigest()
+    aid=execute(insert(mom_attachments).values(mom_id=mom_id,lead_id=m["lead_id"],filename=filename,content_type=DOCX_MIME,size_bytes=len(data),sha256=digest,data=data,uploaded_by=u["id"]))
+    audit(u["id"],"mom_attachment",aid,"CREATE",{"mom_id":mom_id,"filename":filename,"size_bytes":len(data),"sha256":digest})
+    return {"id":aid,"mom_id":mom_id,"filename":filename,"size_bytes":len(data),"uploaded_by":u["id"],"uploaded_by_name":u["name"],"can_delete":True}
+
+@app.get("/api/moms/{mom_id}/attachments/{attachment_id}")
+def download_mom_attachment(mom_id:int,attachment_id:int,u=Depends(require_perm("LEAD_VIEW"))):
+    _mom_for(u,mom_id)
+    a=row(select(mom_attachments).where(and_(mom_attachments.c.id==attachment_id,mom_attachments.c.mom_id==mom_id)))
+    if not a: raise HTTPException(404,"Attachment not found")
+    from urllib.parse import quote
+    ascii_name="".join(ch if ch.isascii() and ch.isprintable() and ch not in '"\\;' else "_" for ch in a["filename"])
+    return Response(content=bytes(a["data"]),media_type=DOCX_MIME,headers={
+        "Content-Disposition":f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(a['filename'])}",
+        "Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
+
+@app.delete("/api/moms/{mom_id}/attachments/{attachment_id}")
+def delete_mom_attachment(mom_id:int,attachment_id:int,u=Depends(require_csrf)):
+    _mom_for(u,mom_id)
+    a=row(select(mom_attachments.c.id,mom_attachments.c.filename,mom_attachments.c.uploaded_by).where(and_(mom_attachments.c.id==attachment_id,mom_attachments.c.mom_id==mom_id)))
+    if not a: raise HTTPException(404,"Attachment not found")
+    if a["uploaded_by"]!=u["id"] and u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only the uploader, Super Admin or Admin can remove this file")
+    execute(delete(mom_attachments).where(mom_attachments.c.id==attachment_id))
+    audit(u["id"],"mom_attachment",attachment_id,"DELETE",{"mom_id":mom_id,"filename":a["filename"]}); return {"ok":True}
 
 @app.get("/api/meetings")
 def list_meetings(u=Depends(require_perm("LEAD_VIEW"))):
