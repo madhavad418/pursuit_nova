@@ -55,6 +55,10 @@
 .pmap-tip.leaflet-tooltip-top::before{border-top-color:rgba(1,47,98,.95)!important}
 /* Prospect editing */
 .input:disabled{background:#f5f8fa;color:var(--muted);cursor:not-allowed}
+.field-group{display:grid;gap:8px}
+.source-group{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)}
+.geography-group{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(max-width:760px){.source-group,.geography-group{grid-template-columns:1fr}}
 .check-row{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:14px;color:var(--ink)}
 .modal-actions.split>span{flex:1}
 .contact-card{position:relative}

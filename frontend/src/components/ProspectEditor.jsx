@@ -21,6 +21,8 @@ export const EDITOR_FIELDS={
  list:['temperature','status','owner_id','next_follow_up','region','country','state','city','remarks'],
  overview:['name','vertical','owner_id','source','source_detail','city','state','country','remarks'],
 }
+// Rows as displayed; grouped rows edit several fields under one Overview heading
+const LAYOUT={list:EDITOR_FIELDS.list,overview:['name','vertical','owner_id','source_group','geography','remarks']}
 const COMPANY_KEYS=new Set(['name','vertical'])
 
 /**
@@ -30,6 +32,8 @@ const COMPANY_KEYS=new Set(['name','vertical'])
 export function ProspectEditor({leadId,open,onClose,onSaved,onToast,variant='list'}){
  const [detail,setDetail]=useState(null); const [form,setForm]=useState(null); const [users,setUsers]=useState([]); const [saving,setSaving]=useState(false); const [error,setError]=useState('')
  const keys=EDITOR_FIELDS[variant]||EDITOR_FIELDS.list
+ const layout=LAYOUT[variant]||LAYOUT.list
+ const overviewLabels=variant==='overview'
  useEffect(()=>{
   if(!open||!leadId)return
   let live=true; setDetail(null); setForm(null); setError('')
@@ -65,7 +69,7 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast,variant='lis
  const ownerOptions=form&&!users.some(u=>String(u.id)===form.owner_id)?[{id:form.owner_id,name:detail?.lead.owner_name||'Current owner',role:'current'},...users]:users
  const input=(k,props={})=><Input disabled={locked(k)} value={form[k]} onChange={e=>set(k,e.target.value)} {...props}/>
  const FIELDS={
-  name:()=> <Field key="name" label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>,
+  name:()=> <Field key="name" label={overviewLabels?'Company':'Company name'} required>{input('name',{required:true,maxLength:220})}</Field>,
   vertical:()=> <Field key="vertical" label="Vertical" required>{input('vertical',{required:true,maxLength:120,placeholder:'e.g. Telecommunications'})}</Field>,
   owner_id:()=> <Field key="owner_id" label="Owner"><Select disabled={locked('owner_id')} value={form.owner_id} onChange={e=>set('owner_id',e.target.value)}>{ownerOptions.map(u=><option key={u.id} value={u.id}>{u.name}{u.role&&u.role!=='current'?` · ${u.role}`:''}</option>)}</Select></Field>,
   temperature:()=> <Field key="temperature" label="Signal"><Select disabled={locked('temperature')} value={form.temperature} onChange={e=>set('temperature',e.target.value)}>{['Hot','Warm','Cold'].map(x=><option key={x}>{x}</option>)}</Select></Field>,
@@ -77,6 +81,15 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast,variant='lis
   country:()=> <Field key="country" label="Country">{input('country',{maxLength:100})}</Field>,
   state:()=> <Field key="state" label="State">{input('state',{maxLength:100})}</Field>,
   city:()=> <Field key="city" label="City">{input('city',{maxLength:100})}</Field>,
+  source_group:()=> <div key="source_group" className="field"><span>Source</span><div className="field-group source-group">
+   <Select aria-label="Source" disabled={locked('source')} value={form.source} onChange={e=>set('source',e.target.value)}>{(LEAD_SOURCES.includes(form.source)?LEAD_SOURCES:[form.source,...LEAD_SOURCES]).map(x=><option key={x}>{x}</option>)}</Select>
+   {input('source_detail',{'aria-label':'Source detail',maxLength:255,placeholder:'Detail, e.g. referred by'})}
+  </div></div>,
+  geography:()=> <div key="geography" className="field span-2"><span>Geography</span><div className="field-group geography-group">
+   {input('city',{'aria-label':'City',maxLength:100,placeholder:'City'})}
+   {input('state',{'aria-label':'State',maxLength:100,placeholder:'State'})}
+   {input('country',{'aria-label':'Country',maxLength:100,placeholder:'Country'})}
+  </div></div>,
   remarks:()=> <Field key="remarks" label="Remarks" className="span-2"><Textarea disabled={locked('remarks')} value={form.remarks} onChange={e=>set('remarks',e.target.value)}/></Field>,
  }
  return <Modal open={open} onClose={onClose} title="Edit prospect" eyebrow={detail?.lead.company_name||'Loading…'} size="lg">
@@ -84,7 +97,7 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast,variant='lis
   {!form&&!error&&<Spinner label="Loading prospect"/>}
   {form&&<form onSubmit={save}>
    {!canSave&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
-   <div className="form-grid">{keys.map(k=>FIELDS[k]())}</div>
+   <div className="form-grid">{layout.map(k=>FIELDS[k]())}</div>
    <div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>{canSave&&<Button type="submit" disabled={saving}>{saving?'Saving…':'Save changes'}</Button>}</div>
   </form>}
  </Modal>
