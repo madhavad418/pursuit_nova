@@ -1,4 +1,4 @@
-import React,{useEffect,useMemo,useRef} from 'react'
+import React,{useEffect,useMemo,useRef,useState} from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { feature } from 'topojson-client'
@@ -80,9 +80,11 @@ const WORLD_CENTER=[28,12]
 // Zoom at which one world copy exactly fills the panel width, like the reference map
 const fitWidthZoom=el=>Math.log2(Math.max(el.clientWidth,256)/256)
 
-export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
+export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,focus=''}){
   const containerRef=useRef(null)
   const mapInstance=useRef(null)
+  const pointsRef=useRef([])
+  const [expanded,setExpanded]=useState(false)
 
   // Merge location rows by resolved country
   const byCountry=useMemo(()=>{
@@ -108,6 +110,7 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
       maxBounds:[[-62,-180],[84,190]],maxBoundsViscosity:1,
     })
     mapInstance.current=map
+    pointsRef.current=[]
 
     // Countries with prospects are filled blue; the rest stay dark with fine borders (as in the reference)
     const active=new Set(Object.keys(byCountry))
@@ -122,6 +125,7 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
       const c=coordsFor(e.country)
       if(c) points.push({...e,lat:c[0],lng:c[1]})
     }
+    pointsRef.current=points
 
     points.forEach(p=>{
       if(Math.abs(p.lat-HQ[0])>1||Math.abs(p.lng-HQ[1])>1)
@@ -145,9 +149,25 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
     return()=>{if(mapInstance.current){mapInstance.current.remove();mapInstance.current=null}}
   },[byCountry,focus])
 
-  const reset=()=>{const m=mapInstance.current;if(m&&containerRef.current)m.setView(WORLD_CENTER,fitWidthZoom(containerRef.current))}
+  // Expand / minimise: after the panel changes size, re-measure and show the same view again
+  useEffect(()=>{
+    const m=mapInstance.current,el=containerRef.current
+    if(m&&el){
+      m.invalidateSize({animate:false})
+      const z=fitWidthZoom(el);m.setMinZoom(z)
+      const pts=pointsRef.current
+      if(focus&&pts.length) m.fitBounds(L.latLngBounds(pts.map(p=>[p.lat,p.lng])),{padding:[90,90],maxZoom:4,animate:false})
+      else m.setView(WORLD_CENTER,z,{animate:false})
+    }
+    if(!expanded) return
+    const onKey=e=>{if(e.key==='Escape')setExpanded(false)}
+    const prevOverflow=document.body.style.overflow
+    document.body.style.overflow='hidden'
+    window.addEventListener('keydown',onKey)
+    return()=>{window.removeEventListener('keydown',onKey);document.body.style.overflow=prevOverflow}
+  },[expanded])
 
-  return <div className="pmap-wrap">
+  return <div className={`pmap-wrap${expanded?' is-expanded':''}`} role={expanded?'dialog':undefined} aria-modal={expanded||undefined} aria-label={expanded?'Prospect geography map':undefined}>
     <div ref={containerRef} className="pmap-canvas"/>
     <div className="pmap-info">
       <div className="pmap-info-label">Global Network</div>
@@ -155,15 +175,17 @@ export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
       <div className="pmap-info-sub">{countryCount} {countryCount===1?'country':'countries'}</div>
     </div>
     <div className="pmap-controls">
-      <button onClick={reset} title="Reset view" aria-label="Reset view">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></svg>
+      <button type="button" className="pmap-expand" onClick={()=>setExpanded(x=>!x)} title={expanded?'Minimise map':'Expand map'} aria-label={expanded?'Minimise map':'Expand map'} aria-pressed={expanded}>
+        {expanded
+          ?<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></svg>
+          :<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></svg>}
       </button>
-      <button onClick={()=>mapInstance.current?.zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
-      <button onClick={()=>mapInstance.current?.zoomOut()} title="Zoom out" aria-label="Zoom out">&minus;</button>
+      <button type="button" onClick={()=>mapInstance.current?.zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
+      <button type="button" onClick={()=>mapInstance.current?.zoomOut()} title="Zoom out" aria-label="Zoom out">&minus;</button>
     </div>
-    <div className="pmap-legend">
+    <div className="pmap-legend" aria-label="Prospects by region">
       <span><i className="pmap-legend-dot"/>Prospect</span>
-      <span><i className="pmap-legend-line"/>HQ link</span>
+      {regionCounts.map(r=><span key={r.region} className="pmap-legend-region">{r.region}<b>{r.leads}</b></span>)}
     </div>
   </div>
 }
