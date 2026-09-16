@@ -8,6 +8,14 @@ export function money(value, currency = 'USD', compact = true) {
     }).format(number)
   } catch { return `${currency} ${number.toLocaleString()}` }
 }
+// Date and time in the viewer's own time zone, e.g. "16 Sept 2026, 4:45 pm". Expects an ISO timestamp with a zone (…Z).
+export function dateTimeText(value) {
+  if (!value) return ''
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
 export function dateText(value) {
   if (!value) return '—'
   const d = new Date(`${String(value).slice(0, 10)}T00:00:00`)

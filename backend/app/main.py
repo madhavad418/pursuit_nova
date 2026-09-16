@@ -138,6 +138,14 @@ def json_log(event, **kwargs):
     logger.info(json.dumps({"ts":utcnow().isoformat(),"event":event,**kwargs},default=str))
 
 def utcnow(): return datetime.now(timezone.utc)
+def iso_utc(value):
+    """Timestamps are stored as UTC without a zone; send them with an explicit Z so browsers show local time correctly."""
+    if not value: return None
+    if isinstance(value, str):
+        try: value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError: return None
+    if value.tzinfo is None: value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def today_str(): return date.today().isoformat()
 def asdict(r): return dict(r._mapping) if r is not None else None
 
@@ -840,6 +848,13 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     #  owner            -> also LEAD_REASSIGN
     #  company/contacts -> COMPANY_EDIT / CONTACT_EDIT and the user can see a prospect of that company
     #  delete           -> Super Admin or Admin who can edit the prospect
+    # Last time the Overview content was saved: an edit of this prospect or of its company (from the audit trail,
+    # because leads.updated_at also moves when meetings, MoM follow-ups or opportunities are added)
+    last_edit=row(select(func.max(audit_logs.c.created_at).label("at")).where(and_(audit_logs.c.action=="UPDATE",or_(
+        and_(audit_logs.c.entity_type=="lead",audit_logs.c.entity_id==lead_id),
+        and_(audit_logs.c.entity_type=="company",audit_logs.c.entity_id==l["company_id"])))))
+    l["last_edited_at"]=iso_utc((last_edit or {}).get("at"))
+    l["created_at_utc"]=iso_utc(l.get("created_at"))
     editable=can_edit_lead(u,lead_id)
     related=can_access_company_relationship(u,l["company_id"])
     perms={"can_edit":editable,"can_edit_company":related and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":related and "CONTACT_EDIT" in u["permissions"],
