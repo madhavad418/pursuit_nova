@@ -80,7 +80,7 @@ const WORLD_CENTER=[28,12]
 // Zoom at which one world copy exactly fills the panel width, like the reference map
 const fitWidthZoom=el=>Math.log2(Math.max(el.clientWidth,256)/256)
 
-export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,focus=''}){
+export default function ProspectMap({locations=[],totalLeads=0,focus=''}){
   const containerRef=useRef(null)
   const mapInstance=useRef(null)
   const pointsRef=useRef([])
@@ -181,9 +181,8 @@ export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,f
       <button type="button" onClick={()=>mapInstance.current?.zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
       <button type="button" onClick={()=>mapInstance.current?.zoomOut()} title="Zoom out" aria-label="Zoom out">&minus;</button>
     </div>
-    <div className="pmap-legend" aria-label="Prospects by region">
+    <div className="pmap-legend">
       <span><i className="pmap-legend-dot"/>Prospect region count</span>
-      {regionCounts.map(r=><span key={r.region} className="pmap-legend-region">{r.region}<b>{r.leads}</b></span>)}
     </div>
   </div>
 }
