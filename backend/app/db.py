@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from argon2 import PasswordHasher
 from sqlalchemy import (
-    MetaData, Table, Column, Integer, String, Text, Float, Boolean, DateTime,
+    MetaData, Table, Column, Integer, String, Text, Float, Boolean, DateTime, LargeBinary,
     ForeignKey, UniqueConstraint, Index, create_engine, select, func, and_, or_, text, inspect
 )
 from sqlalchemy.engine import Engine
@@ -389,6 +389,21 @@ revoked_sessions = Table(
     Column("revoked_at", DateTime, server_default=func.current_timestamp()),
 )
 
+# Word documents attached to a Minutes of Meeting. Stored in the database because the app host's disk is not persistent.
+mom_attachments = Table(
+    "mom_attachments", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("mom_id", ForeignKey("moms.id", ondelete="CASCADE"), nullable=False),
+    Column("lead_id", ForeignKey("leads.id", ondelete="CASCADE"), nullable=False),
+    Column("filename", String(255), nullable=False),
+    Column("content_type", String(120), nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("data", LargeBinary, nullable=False),
+    Column("uploaded_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+
 # Work items that are not tied to a prospect (PPT preparation, summit preparation, internal tasks)
 generic_actions = Table(
     "generic_actions", metadata,
@@ -448,6 +463,7 @@ kpi_actuals = Table(
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
+Index("ix_mom_attachments_mom", mom_attachments.c.mom_id)
 Index("ix_generic_actions_assignee_due", generic_actions.c.assigned_to, generic_actions.c.due_date)
 Index("ix_opps_owner_status", opportunities.c.owner_id, opportunities.c.status)
 Index("ix_companies_norm", companies.c.normalized_name)
@@ -543,7 +559,7 @@ def _bootstrap_initial_admin():
 def _add_missing_columns():
     """create_all() never alters existing tables, so add columns introduced after a database was first created."""
     # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
-    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions):
+    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
