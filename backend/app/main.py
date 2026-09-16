@@ -727,7 +727,7 @@ def update_company(company_id:int,p:Payload,u=Depends(require_csrf)):
     d=p.data; vals={k:d[k] for k in ("name","vertical","website","linkedin_url","external_url","region","country","state","city","remarks","status") if k in d}
     for k in ("name","vertical"):
         if k in vals:
-            vals[k]=_clean_text(vals[k],220 if k=="name" else 120)
+            vals[k]=_clean_text(vals[k],220 if k=="name" else None)
             if not vals[k]: raise HTTPException(400,f"Company {k} is required")
     for k,label,n in (("region","Region",80),("country","Country",100),("state","State",100),("city","City",100),("remarks","Company notes",None)):
         if k in vals: vals[k]=_clean_text(vals[k],n)

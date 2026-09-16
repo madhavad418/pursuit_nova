@@ -78,7 +78,7 @@ companies = Table(
     Column("id", Integer, primary_key=True),
     Column("name", String(220), nullable=False),
     Column("normalized_name", String(220), nullable=False),
-    Column("vertical", String(120), nullable=False),
+    Column("vertical", Text, nullable=False),
     Column("website", String(500)),
     Column("domain", String(255)),
     Column("linkedin_url", String(500)),
@@ -567,6 +567,11 @@ def _add_missing_columns():
     if "category" not in {c["name"] for c in inspect(engine).get_columns("users")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE users ADD COLUMN category VARCHAR(80)"))
+    # Vertical is free text of any length (widening a column keeps every existing value as it is)
+    vcol = next(c for c in inspect(engine).get_columns("companies") if c["name"] == "vertical")
+    if engine.dialect.name == "postgresql" and getattr(vcol["type"], "length", None):
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE companies ALTER COLUMN vertical TYPE TEXT"))
 
 def _migrate_hierarchy_scopes():
     """One-time move of Admin/Director from organisation-wide to hierarchy scope, so only Super Admins see everything."""

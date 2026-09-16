@@ -84,7 +84,7 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
    {!canSave&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
    <div className="form-section"><h3>Company</h3><div className="form-grid">
     <Field label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>
-    <Field label="Vertical" required>{input('vertical',{required:true,maxLength:120,placeholder:'e.g. Telecommunications'})}</Field>
+    <Field label="Vertical" required>{input('vertical',{required:true,placeholder:'e.g. Telecommunications'})}</Field>
     <Field label="Website">{input('website',{placeholder:'https://'})}</Field>
     <Field label="LinkedIn company">{input('linkedin_url',{placeholder:'https://linkedin.com/company/...'})}</Field>
     <Field label="Region">{select('region',<><option value="">Select region</option>{withCurrent(REGIONS,form.region).map(x=><option key={x}>{x}</option>)}</>)}</Field>
