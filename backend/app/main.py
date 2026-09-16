@@ -44,7 +44,7 @@ from app.db import (
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
     org_settings, fx_rates, field_permissions, saved_views, dashboard_preferences, microsoft_integrations,
-    kpi_templates, kpi_targets, kpi_actuals,
+    kpi_templates, kpi_targets, kpi_actuals, generic_actions,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -895,6 +895,116 @@ def delete_action(action_id:int,u=Depends(require_csrf)):
     if not a: raise HTTPException(404,"Action not found")
     execute(delete(actions).where(actions.c.id==action_id))
     audit(u["id"],"action",action_id,"DELETE",{"description":a["description"]}); return {"ok":True}
+
+# ── Generic actions: work not tied to a prospect (PPT, summit preparation, internal tasks) ──
+GENERIC_ACTION_TYPES=["Presentation / PPT","Summit / event preparation","Proposal preparation","Internal meeting","Training","Documentation","Other"]
+ACTION_STATUSES=("Open","In Progress","Completed","Cancelled")
+ACTION_PRIORITIES=("Low","Medium","High","Critical")
+
+def _valid_date(v):
+    try: return datetime.strptime(str(v),"%Y-%m-%d").strftime("%Y-%m-%d")
+    except Exception: return None
+
+def generic_action_access(u,a):
+    """Same hierarchy rule as prospect actions: your own, ones you created, and your reporting team's."""
+    ids=set(scope_user_ids(u))
+    visible=is_super(u) or a["assigned_to"]==u["id"] or a["created_by"]==u["id"] or a["assigned_to"] in ids or a["created_by"] in ids
+    can_edit=visible and "ACTION_EDIT" in u["permissions"]
+    can_delete=visible and (u["role"] in ("Super Admin","Admin") or a["created_by"]==u["id"])
+    return visible,can_edit,can_delete
+
+def generic_action_row(action_id,u):
+    aa=users.alias("aa"); cr=users.alias("cr")
+    r=row(select(generic_actions,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to).join(cr,cr.c.id==generic_actions.c.created_by)).where(generic_actions.c.id==action_id))
+    if r:
+        _,r["can_edit"],r["can_delete"]=generic_action_access(u,r)
+        r["overdue"]=r["status"] not in ("Completed","Cancelled") and r["due_date"]<today_str()
+    return r
+
+@app.get("/api/generic-actions")
+def list_generic_actions(filter:str=Query(default="all"),u=Depends(current_user)):
+    aa=users.alias("aa"); cr=users.alias("cr")
+    stmt=select(generic_actions,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to).join(cr,cr.c.id==generic_actions.c.created_by))
+    if not is_super(u):
+        ids=scope_user_ids(u)
+        stmt=stmt.where(or_(generic_actions.c.assigned_to.in_(ids),generic_actions.c.created_by.in_(ids)))
+    t=today_str(); out=[]
+    for a in rows(stmt.order_by(generic_actions.c.due_date,generic_actions.c.id)):
+        open_=a["status"] not in ("Completed","Cancelled")
+        a["overdue"]=open_ and a["due_date"]<t
+        if filter=="my" and a["assigned_to"]!=u["id"]: continue
+        if filter=="overdue" and not a["overdue"]: continue
+        if filter=="today" and not (open_ and a["due_date"]==t): continue
+        if filter=="upcoming" and not (open_ and a["due_date"]>t): continue
+        if filter=="completed" and a["status"]!="Completed": continue
+        _,a["can_edit"],a["can_delete"]=generic_action_access(u,a)
+        out.append(a)
+    return {"types":GENERIC_ACTION_TYPES,"can_create":"ACTION_EDIT" in u["permissions"],"items":out}
+
+def _generic_action_values(d,partial:bool):
+    vals={}
+    if not partial or "title" in d:
+        title=str(d.get("title") or "").strip()
+        if not title: raise HTTPException(400,"Title is required")
+        if len(title)>255: raise HTTPException(400,"Title must be 255 characters or fewer")
+        vals["title"]=title
+    if not partial or "due_date" in d:
+        due=_valid_date(d.get("due_date"))
+        if not due: raise HTTPException(400,"A valid due date is required")
+        vals["due_date"]=due
+    if not partial or "action_type" in d: vals["action_type"]=d.get("action_type") if d.get("action_type") in GENERIC_ACTION_TYPES else "Other"
+    if not partial or "priority" in d:
+        if d.get("priority") and d["priority"] not in ACTION_PRIORITIES: raise HTTPException(400,"Invalid priority")
+        vals["priority"]=d.get("priority") or "Medium"
+    if "status" in d or not partial:
+        if d.get("status") and d["status"] not in ACTION_STATUSES: raise HTTPException(400,"Invalid status")
+        vals["status"]=d.get("status") or "Open"
+    for k in ("description","remarks"):
+        if k in d: vals[k]=(str(d[k]).strip() or None) if d[k] is not None else None
+    return vals
+
+@app.post("/api/generic-actions")
+def create_generic_action(p:Payload,u=Depends(require_csrf)):
+    if "ACTION_EDIT" not in u["permissions"]: raise HTTPException(403,"Action permission denied")
+    d=p.data; vals=_generic_action_values(d,partial=False)
+    assigned=int(d.get("assigned_to") or u["id"])
+    if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
+    if vals["status"]=="Completed": vals["completion_date"]=today_str()
+    aid=execute(insert(generic_actions).values(**vals,assigned_to=assigned,created_by=u["id"]))
+    if assigned!=u["id"]:
+        execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="New action assigned",message=vals["title"],entity_type="generic_action",entity_id=aid,due_date=vals["due_date"],severity="info"))
+    audit(u["id"],"generic_action",aid,"CREATE",{**vals,"assigned_to":assigned})
+    return generic_action_row(aid,u)
+
+@app.put("/api/generic-actions/{action_id}")
+def update_generic_action(action_id:int,p:Payload,u=Depends(require_csrf)):
+    a=row(select(generic_actions).where(generic_actions.c.id==action_id))
+    if not a: raise HTTPException(404,"Action not found")
+    visible,can_edit,_=generic_action_access(u,a)
+    if not visible: raise HTTPException(404,"Action not found")
+    if not can_edit: raise HTTPException(403,"You cannot update this action")
+    d=p.data; vals=_generic_action_values(d,partial=True)
+    if d.get("assigned_to") and int(d["assigned_to"])!=a["assigned_to"]:
+        assigned=int(d["assigned_to"])
+        if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
+        vals["assigned_to"]=assigned
+        execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="Action assigned to you",message=vals.get("title") or a["title"],entity_type="generic_action",entity_id=action_id,due_date=vals.get("due_date") or a["due_date"],severity="info"))
+    if vals.get("status")=="Completed" and a["status"]!="Completed": vals["completion_date"]=today_str()
+    elif vals.get("status") and vals["status"]!="Completed": vals["completion_date"]=None
+    vals["updated_at"]=utcnow()
+    execute(update(generic_actions).where(generic_actions.c.id==action_id).values(**vals))
+    audit(u["id"],"generic_action",action_id,"UPDATE",d)
+    return generic_action_row(action_id,u)
+
+@app.delete("/api/generic-actions/{action_id}")
+def delete_generic_action(action_id:int,u=Depends(require_csrf)):
+    a=row(select(generic_actions).where(generic_actions.c.id==action_id))
+    if not a: raise HTTPException(404,"Action not found")
+    visible,_,can_delete=generic_action_access(u,a)
+    if not visible: raise HTTPException(404,"Action not found")
+    if not can_delete: raise HTTPException(403,"Only Super Admin, Admin or the creator can delete this action")
+    execute(delete(generic_actions).where(generic_actions.c.id==action_id))
+    audit(u["id"],"generic_action",action_id,"DELETE",{"title":a["title"]}); return {"ok":True}
 
 @app.get("/api/opportunities")
 def list_opportunities(u=Depends(require_perm("OPPORTUNITY_VIEW"))): return opportunity_rows(u)
