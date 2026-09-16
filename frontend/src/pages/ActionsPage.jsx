@@ -55,7 +55,7 @@ function ProspectActions({onToast,filter,assignableUsers}){
 }
 
 /* ─── Generic actions: work not tied to a prospect (PPT, summit preparation…) ─── */
-const emptyGeneric=userId=>({id:null,title:'',action_type:'Presentation / PPT',description:'',assigned_to:String(userId),due_date:'',priority:'Medium',status:'Open',remarks:''})
+const emptyGeneric=userId=>({id:null,title:'',action_type:'',description:'',assigned_to:String(userId),due_date:'',priority:'Medium',status:'Open',remarks:''})
 
 function GenericActions({onToast,filter,assignableUsers,createSignal}){
  const {user}=useAuth()
@@ -70,14 +70,16 @@ function GenericActions({onToast,filter,assignableUsers,createSignal}){
  const fail=e=>onToast?.({type:'error',message:e.message})
  const update=async(a,status)=>{try{await api.put(`/api/generic-actions/${a.id}`,{status});onToast?.({message:`Action ${status==='Completed'?'completed':'started'}`});load()}catch(e){fail(e)}}
  const remove=async a=>{if(!confirm(`Delete action "${a.title}"?`))return;try{await api.delete(`/api/generic-actions/${a.id}`);onToast?.({message:'Action deleted'});load()}catch(e){fail(e)}}
- const openEdit=a=>setForm({id:a.id,title:a.title||'',action_type:a.action_type||'Other',description:a.description||'',assigned_to:String(a.assigned_to),due_date:a.due_date||'',priority:a.priority||'Medium',status:a.status||'Open',remarks:a.remarks||''})
- const save=async e=>{e.preventDefault();setSaving(true)
-  try{const {id,...fields}=form;fields.assigned_to=Number(fields.assigned_to)
+ const openEdit=a=>setForm({id:a.id,title:a.title||'',action_type:a.action_type||'',description:a.description||'',assigned_to:String(a.assigned_to),due_date:a.due_date||'',priority:a.priority||'Medium',status:a.status||'Open',remarks:a.remarks||''})
+ const save=async e=>{e.preventDefault()
+  const title=form.title.trim(), action_type=form.action_type.trim()
+  if(!title||!action_type){onToast?.({type:'error',message:!title?'Title is required':'Type is required'});return}
+  setSaving(true)
+  try{const {id,...fields}=form;fields.title=title;fields.action_type=action_type;fields.assigned_to=Number(fields.assigned_to)
    if(id){await api.put(`/api/generic-actions/${id}`,fields);onToast?.({message:'Action updated'})}
    else{await api.post('/api/generic-actions',fields);onToast?.({message:'Action created'})}
    setForm(null);load()
   }catch(err){fail(err)}finally{setSaving(false)}}
- const types=data.types?.length?data.types:['Other']
  // The assignee list must always include the current assignee, even if they are outside the editor's assignable list
  const assigneeOptions=form&&!assignableUsers.some(x=>String(x.id)===String(form.assigned_to))?[...assignableUsers,{id:form.assigned_to,name:rows.find(r=>String(r.assigned_to)===String(form.assigned_to))?.assigned_to_name||'Current assignee',role:'current'}]:assignableUsers
 
@@ -109,7 +111,7 @@ function GenericActions({onToast,filter,assignableUsers,createSignal}){
   <Modal open={!!form} onClose={()=>setForm(null)} title={form?.id?'Edit generic action':'New generic action'} eyebrow="Not linked to a prospect">{form&&<form onSubmit={save}>
    <div className="form-grid">
     <Field label="Title" required className="span-2"><Input required maxLength={255} autoFocus value={form.title} onChange={e=>set('title',e.target.value)} placeholder="e.g. Prepare summit PPT"/></Field>
-    <Field label="Type" required><Select value={form.action_type} onChange={e=>set('action_type',e.target.value)}>{types.map(t=><option key={t}>{t}</option>)}</Select></Field>
+    <Field label="Type" required><Input required maxLength={60} value={form.action_type} onChange={e=>set('action_type',e.target.value)} placeholder="e.g. PPT, Summit preparation"/></Field>
     <Field label="Assigned to" required><Select value={form.assigned_to} onChange={e=>set('assigned_to',e.target.value)}>{assigneeOptions.map(x=><option key={x.id} value={x.id}>{x.name}{x.role&&x.role!=='current'?` · ${x.role}`:''}</option>)}</Select></Field>
     <Field label="Due date" required><Input type="date" required value={form.due_date} onChange={e=>set('due_date',e.target.value)}/></Field>
     <Field label="Priority"><Select value={form.priority} onChange={e=>set('priority',e.target.value)}>{PRIORITIES.map(x=><option key={x}>{x}</option>)}</Select></Field>

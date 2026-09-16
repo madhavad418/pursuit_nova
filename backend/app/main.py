@@ -1091,7 +1091,11 @@ def _generic_action_values(d,partial:bool):
         due=_valid_date(d.get("due_date"))
         if not due: raise HTTPException(400,"A valid due date is required")
         vals["due_date"]=due
-    if not partial or "action_type" in d: vals["action_type"]=d.get("action_type") if d.get("action_type") in GENERIC_ACTION_TYPES else "Other"
+    if not partial or "action_type" in d:
+        action_type=str(d.get("action_type") or "").strip()
+        if not action_type: raise HTTPException(400,"Type is required")
+        if len(action_type)>60: raise HTTPException(400,"Type must be 60 characters or fewer")
+        vals["action_type"]=action_type
     if not partial or "priority" in d:
         if d.get("priority") and d["priority"] not in ACTION_PRIORITIES: raise HTTPException(400,"Invalid priority")
         vals["priority"]=d.get("priority") or "Medium"

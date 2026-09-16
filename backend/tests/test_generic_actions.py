@@ -30,7 +30,7 @@ def test_generic_action_lifecycle_and_hierarchy(client, login, csrf_headers):
     assert own['assigned_to'] == exec1['id'] and own['status'] == 'Open' and own['can_edit'] and own['can_delete']
 
     # A self-scoped executive cannot assign work to a peer
-    r = client.post('/api/generic-actions', json={'data': {'title': 'x', 'due_date': TOMORROW, 'assigned_to': exec2['id']}}, headers=csrf_headers(client))
+    r = client.post('/api/generic-actions', json={'data': {'title': 'x', 'action_type': 'PPT', 'due_date': TOMORROW, 'assigned_to': exec2['id']}}, headers=csrf_headers(client))
     assert r.status_code == 403, r.text
 
     # Peers cannot see, edit or delete each other's generic actions
@@ -78,8 +78,16 @@ def test_generic_action_validation_and_csrf(client, login, csrf_headers):
     assert client.post('/api/generic-actions', json={'data': {'title': '', 'due_date': TOMORROW}}, headers=h).status_code == 400
     assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': '15-09-2026'}}, headers=h).status_code == 400
     assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW, 'priority': 'Urgent!!'}}, headers=h).status_code == 400
-    r = client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW, 'action_type': 'Not a type'}}, headers=h)
-    assert r.status_code == 200 and r.json()['action_type'] == 'Other'
+    r = client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW, 'action_type': '  Client workshop prep  '}}, headers=h)
+    assert r.status_code == 200 and r.json()['action_type'] == 'Client workshop prep'   # typed value kept, trimmed
+    assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW, 'action_type': '   '}}, headers=h).status_code == 400
+    assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW}}, headers=h).status_code == 400
+    assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW, 'action_type': 'x' * 61}}, headers=h).status_code == 400
+    assert client.post('/api/generic-actions', json={'data': {'title': 'Deck 60', 'due_date': TOMORROW, 'action_type': 'y' * 60}}, headers=h).json()['action_type'] == 'y' * 60
+    upd = client.put(f"/api/generic-actions/{r.json()['id']}", json={'data': {'action_type': 'Board review deck'}}, headers=h)
+    assert upd.status_code == 200 and upd.json()['action_type'] == 'Board review deck'
+    assert client.put(f"/api/generic-actions/{r.json()['id']}", json={'data': {'action_type': ''}}, headers=h).status_code == 400
+    assert client.put(f"/api/generic-actions/{r.json()['id']}", json={'data': {'priority': 'High'}}, headers=h).json()['action_type'] == 'Board review deck'  # untouched when not sent
     assert client.put(f"/api/generic-actions/{r.json()['id']}", json={'data': {'status': 'Nope'}}, headers=h).status_code == 400
     # Mutations need the CSRF header
     assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW}}).status_code == 403
