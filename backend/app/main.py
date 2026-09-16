@@ -339,6 +339,11 @@ def can_view_opp(u, opp_id: int) -> bool:
 def can_edit_opp(u, opp_id: int) -> bool:
     return "OPPORTUNITY_EDIT" in u["permissions"] and can_view_opp(u, opp_id)
 
+def can_edit_company_relationship(u, company_id: int) -> bool:
+    """Changing company identity or contacts needs edit rights on one of its prospects (or organisation-wide scope)."""
+    if u.get("scope_type") == "all": return True
+    return any(can_edit_lead(u, lr["id"]) for lr in rows(select(leads.c.id).where(leads.c.company_id==company_id)))
+
 def _clean_text(v, max_len=None):
     if v is None: return None
     t=str(v).strip()
@@ -713,8 +718,9 @@ def company_detail(company_id:int,u=Depends(require_perm("COMPANY_VIEW"))):
 
 @app.put("/api/companies/{company_id}")
 def update_company(company_id:int,p:Payload,u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403,"Company edit permission required")
     if not row(select(companies.c.id).where(companies.c.id==company_id)): raise HTTPException(404,"Company not found")
-    if not can_access_company_relationship(u,company_id): raise HTTPException(403,"Company relationship edit denied")
+    if not can_edit_company_relationship(u,company_id): raise HTTPException(403,"Company relationship edit denied")
     d=p.data; vals={k:d[k] for k in ("name","vertical","website","linkedin_url","external_url","region","country","state","city","remarks","status") if k in d}
     for k in ("name","vertical"):
         if k in vals:
@@ -733,9 +739,10 @@ def update_company(company_id:int,p:Payload,u=Depends(require_csrf)):
 
 @app.post("/api/companies/{company_id}/contacts")
 def add_contact(company_id:int,p:Payload,u=Depends(require_csrf)):
+    if "CONTACT_EDIT" not in u["permissions"]: raise HTTPException(403,"Contact edit permission required")
     if not can_access_company_relationship(u,company_id): raise HTTPException(403,"Company relationship access denied")
     d=p.data; ensure_fields_editable(u,"contact",d)
-    if not str(d.get("name") or "").strip(): raise HTTPException(400,"Contact name is required")
+    if not d.get("name"): raise HTTPException(400,"Contact name is required")
     ne=normalize_email(d.get("email"))
     if ne and row(select(contacts.c.id).where(and_(contacts.c.company_id==company_id,contacts.c.normalized_email==ne,contacts.c.active==True))): raise HTTPException(409,"A contact with this email already exists for the company")
     cid=execute(insert(contacts).values(company_id=company_id,name=d["name"],designation=d.get("designation"),department=d.get("department"),email=d.get("email"),normalized_email=ne,phone=d.get("phone"),linkedin_url=d.get("linkedin_url"),location=d.get("location"),remarks=d.get("remarks"),is_primary=bool(d.get("is_primary")),active=True,created_by=u["id"]))
@@ -743,9 +750,10 @@ def add_contact(company_id:int,p:Payload,u=Depends(require_csrf)):
 
 @app.put("/api/contacts/{contact_id}")
 def update_contact(contact_id:int,p:Payload,u=Depends(require_csrf)):
+    if "CONTACT_EDIT" not in u["permissions"]: raise HTTPException(403,"Contact edit permission required")
     cr=row(select(contacts.c.company_id).where(contacts.c.id==contact_id))
     if not cr: raise HTTPException(404,"Contact not found")
-    if not can_access_company_relationship(u,int(cr["company_id"])): raise HTTPException(403,"Contact relationship access denied")
+    if not can_edit_company_relationship(u,int(cr["company_id"])): raise HTTPException(403,"Contact relationship access denied")
     d=p.data; ensure_fields_editable(u,"contact",d); vals={k:d[k] for k in ("name","designation","department","email","phone","linkedin_url","location","remarks","is_primary","active") if k in d}
     if "name" in vals:
         vals["name"]=_clean_text(vals["name"],180)
@@ -832,12 +840,14 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     for o in opps: timeline.append({"date":str(o["created_at"])[:10],"type":"Opportunity","title":o["name"],"detail":f"{o['status']} · {o['forecast_category']}"})
     for f in fs: timeline.append({"date":f["follow_up_date"],"type":"Follow-up","title":f["opportunity_name"],"detail":f.get("response") or f.get("remarks")})
     timeline.sort(key=lambda x:x["date"] or "",reverse=True)
-    perms={"can_edit":True,"can_edit_company":True,"can_edit_contacts":True,"can_reassign":True,"can_delete":u["role"] in ("Super Admin","Admin")}
+    editable=can_edit_lead(u,lead_id)
+    perms={"can_edit":editable,"can_edit_company":editable and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":editable and "CONTACT_EDIT" in u["permissions"],
+           "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_delete":editable and u["role"] in ("Super Admin","Admin")}
     return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
 
 @app.put("/api/leads/{lead_id}")
 def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
-    if not can_view_lead(u,lead_id): raise HTTPException(403,"You do not have access to this prospect")
+    if not can_edit_lead(u,lead_id): raise HTTPException(403,"You cannot edit this lead")
     d=p.data; vals={k:d[k] for k in ("temperature","source","source_detail","status","region","country","state","city","next_follow_up","remarks") if k in d}
     if "temperature" in vals and vals["temperature"] not in LEAD_TEMPERATURES: raise HTTPException(400,"Signal must be Hot, Warm or Cold")
     if "status" in vals and vals["status"] not in LEAD_STATUSES: raise HTTPException(400,"Invalid prospect status")
@@ -854,8 +864,7 @@ def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
         vals["next_follow_up"]=nf
     if "owner_id" in d:
         oid=int(d["owner_id"])
-        target=row(select(users.c.id).where(and_(users.c.id==oid,users.c.active==True)))
-        if not target: raise HTTPException(400,"Owner must be an active user")
+        if "LEAD_REASSIGN" not in u["permissions"] or not can_assign(u,oid): raise HTTPException(403,"You cannot reassign this lead")
         vals["owner_id"]=oid
     vals["updated_at"]=utcnow(); execute(update(leads).where(leads.c.id==lead_id).values(**vals)); audit(u["id"],"lead",lead_id,"UPDATE",d); return lead_detail(lead_id,u)
 
@@ -1631,7 +1640,12 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
         order.append(col.desc() if dir=="desc" else col.asc())
     order.append(leads.c.updated_at.desc())
     items=rows(base.order_by(*order).offset((page-1)*page_size).limit(page_size))
-    for i in items: i["can_edit"]=True
+    if "LEAD_EDIT" in u["permissions"] and items:
+        scope=set(scope_user_ids(u))
+        shared_edit={r["entity_id"] for r in rows(select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type=="lead",record_shares.c.user_id==u["id"],record_shares.c.access_level=="edit",record_shares.c.entity_id.in_([i["id"] for i in items]))))}
+        for i in items: i["can_edit"]=i["owner_id"] in scope or i["id"] in shared_edit
+    else:
+        for i in items: i["can_edit"]=False
     return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"facets":facets,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
 
 @app.get("/api/query/opportunities")

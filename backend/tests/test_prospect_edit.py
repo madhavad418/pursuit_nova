@@ -77,45 +77,27 @@ def test_contacts_can_be_edited_and_removed(client, login, csrf_headers):
     assert 'Tom Hale' not in [c['name'] for c in client.get(f'/api/leads/{lid}').json()['contacts']]
 
 
-def test_anyone_who_can_open_a_prospect_can_edit_all_of_it(client, login, csrf_headers):
+def test_edit_rights_follow_hierarchy(client, login, csrf_headers):
     owner = _as(client, login, EXEC1)
     detail = _own_lead(client, owner)
-    lid, cid = detail['lead']['id'], detail['lead']['company_id']
-    contact_id = client.post(f'/api/companies/{cid}/contacts', json={'data': {'name': 'Edit Test Contact', 'email': 'edit.test@northstar.example'}}, headers=csrf_headers(client)).json()['id']
+    lid, cid, contact_id = detail['lead']['id'], detail['lead']['company_id'], detail['contacts'][0]['id']
 
-    # Someone who cannot see the prospect still cannot touch it
+    # A peer cannot change anything on someone else's prospect
     _as(client, login, EXEC2)
     h = csrf_headers(client)
-    assert lid not in {i['id'] for i in client.get('/api/query/leads', params={'page_size': 100}).json()['items']}
     assert client.put(f'/api/leads/{lid}', json={'data': {'remarks': 'x'}}, headers=h).status_code == 403
     assert client.put(f'/api/companies/{cid}', json={'data': {'linkedin_url': 'https://linkedin.com/company/x'}}, headers=h).status_code == 403
     assert client.put(f'/api/contacts/{contact_id}', json={'data': {'phone': '1'}}, headers=h).status_code == 403
+    assert all(not i['can_edit'] for i in client.get('/api/query/leads', params={'page_size': 100}).json()['items'] if i['owner_id'] == owner['id'])
 
-    # Anyone who can open it can edit every part: prospect, owner, company and contacts
+    # Their manager can, and the list says so
     _as(client, login, LEAD)
     items = {i['id']: i for i in client.get('/api/query/leads', params={'page_size': 100}).json()['items']}
-    assert items and all(i['can_edit'] for i in items.values())
+    assert items[lid]['can_edit']
+    assert client.put(f'/api/companies/{cid}', json={'data': {'remarks': 'Strategic account'}}, headers=csrf_headers(client)).status_code == 200
+    assert not client.get(f'/api/leads/{lid}').json()['permissions']['can_delete']
+
+    # Super Admin can edit and delete
+    _as(client, login, SUPER)
     perms = client.get(f'/api/leads/{lid}').json()['permissions']
-    assert perms['can_edit'] and perms['can_edit_company'] and perms['can_edit_contacts'] and perms['can_reassign'] and not perms['can_delete']
-    h = csrf_headers(client)
-    assert client.put(f'/api/companies/{cid}', json={'data': {'remarks': 'Strategic account'}}, headers=h).status_code == 200
-    assert client.put(f'/api/contacts/{contact_id}', json={'data': {'phone': '+1 555 0101'}}, headers=h).status_code == 200
-    assert client.put(f'/api/leads/{lid}', json={'data': {'owner_id': owner['id'], 'status': 'Qualified'}}, headers=h).status_code == 200
-    assert client.put(f'/api/leads/{lid}', json={'data': {'owner_id': 999999}}, headers=h).status_code == 400
-
-    # A Presales Lead who can see a prospect only through an assigned action may edit it too.
-    # Contact fields an admin has locked for that role (field permissions) stay locked.
-    _as(client, login, SUPER)
-    presales = next(u for u in client.get('/api/users').json() if u['email'] == 'presales@jsan.local')
-    assert client.post(f'/api/leads/{lid}/actions', json={'data': {'description': 'Prepare technical note', 'due_date': '2026-12-01', 'assigned_to': presales['id']}}, headers=csrf_headers(client)).status_code == 200
-    _as(client, login, 'presales@jsan.local')
-    h = csrf_headers(client)
-    assert client.get(f'/api/leads/{lid}').status_code == 200
-    assert client.put(f'/api/contacts/{contact_id}', json={'data': {'designation': 'Programme lead'}}, headers=h).status_code == 200
-    assert client.put(f'/api/contacts/{contact_id}', json={'data': {'email': 'locked@northstar.example'}}, headers=h).status_code == 403
-    assert client.put(f'/api/companies/{cid}', json={'data': {'website': 'northstar-group.example'}}, headers=h).status_code == 200
-    assert client.post(f'/api/companies/{cid}/contacts', json={'data': {'name': 'Added by presales'}}, headers=h).status_code == 200
-
-    # Delete remains limited to Super Admin / Admin
-    _as(client, login, SUPER)
-    assert client.get(f'/api/leads/{lid}').json()['permissions']['can_delete']
+    assert perms['can_edit'] and perms['can_delete'] and perms['can_reassign']
