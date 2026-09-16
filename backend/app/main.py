@@ -1968,7 +1968,7 @@ def download_sample_csv(u=Depends(require_perm("LEAD_CREATE"))):
     return StreamingResponse(iter([content]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=pursuitnova_import_sample.csv"})
 
 @app.post("/api/leads/import")
-def import_leads_csv(file: UploadFile = File(...), u=Depends(current_user)):
+def import_leads_csv(file: UploadFile = File(...), u=Depends(require_csrf)):
     if "LEAD_CREATE" not in u.get("permissions", []): raise HTTPException(403, "Lead create permission required")
     # Read and parse CSV
     try:
@@ -1988,10 +1988,12 @@ def import_leads_csv(file: UploadFile = File(...), u=Depends(current_user)):
         raise HTTPException(400, f"Missing required column(s): {', '.join(required)}. Found: {', '.join(reader.fieldnames or [])}")
 
     # Resolve owner lookup cache
-    user_cache = {}
+    user_cache = {}; user_names = {}
     for ur in rows(select(users.c.id, users.c.name, users.c.email)):
         user_cache[ur["email"].lower()] = ur["id"]
         user_cache[ur["name"].lower()] = ur["id"]
+        user_names[ur["id"]] = ur["name"]
+    assignable_cache = {}  # owner id -> may this importer assign to them (same rule as creating a prospect)
 
     results = {"imported": 0, "skipped": 0, "errors": [], "warnings": []}
 
@@ -2009,6 +2011,11 @@ def import_leads_csv(file: UploadFile = File(...), u=Depends(current_user)):
         owner_id = user_cache.get(owner_key, u["id"])
         if owner_key and owner_key not in user_cache:
             results["warnings"].append({"row": row_num, "message": f"Owner '{r.get('owner_email') or r.get('owner')}' not found — assigned to you"})
+        elif owner_id != u["id"]:
+            if owner_id not in assignable_cache: assignable_cache[owner_id] = can_assign(u, owner_id)
+            if not assignable_cache[owner_id]:
+                results["warnings"].append({"row": row_num, "message": f"You cannot assign prospects to {user_names.get(owner_id, 'that user')} — assigned to you"})
+                owner_id = u["id"]
 
         # Map status
         raw_status = (r.get("status") or "New").strip()

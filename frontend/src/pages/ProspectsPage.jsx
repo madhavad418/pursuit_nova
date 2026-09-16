@@ -59,10 +59,8 @@ export default function ProspectsPage({route,onToast}){
   if(!importFile)return;setImporting(true);setImportResult(null)
   try{
    const form=new FormData();form.append('file',importFile)
-   const csrfToken=document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('csrf_'))?.split('=')[1]
-   const res=await fetch('/api/leads/import',{method:'POST',body:form,headers:csrfToken?{'x-csrf-token':csrfToken}:{}})
-   const data=await res.json()
-   if(!res.ok) throw new Error(data.detail||'Import failed')
+   // api.raw adds the CSRF token and turns error responses into readable messages
+   const data=await api.raw('/api/leads/import',{method:'POST',body:form})
    setImportResult(data);if(data.imported>0)load()
    onToast?.({message:`${data.imported} prospect(s) imported`})
   }catch(err){setImportResult({imported:0,skipped:0,errors:[{row:0,message:err.message}],warnings:[]})}finally{setImporting(false)}
