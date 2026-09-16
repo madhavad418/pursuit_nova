@@ -171,7 +171,6 @@ export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,f
     <div className="pmap-info">
       <div className="pmap-info-label">Global Network</div>
       <div className="pmap-info-num">{totalLeads}<span>prospects</span></div>
-      <div className="pmap-info-sub">Prospect region count</div>
     </div>
     <div className="pmap-controls">
       <button type="button" className="pmap-expand" onClick={()=>setExpanded(x=>!x)} title={expanded?'Minimise map':'Expand map'} aria-label={expanded?'Minimise map':'Expand map'} aria-pressed={expanded}>
@@ -183,7 +182,7 @@ export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,f
       <button type="button" onClick={()=>mapInstance.current?.zoomOut()} title="Zoom out" aria-label="Zoom out">&minus;</button>
     </div>
     <div className="pmap-legend" aria-label="Prospects by region">
-      <span><i className="pmap-legend-dot"/>Prospect</span>
+      <span><i className="pmap-legend-dot"/>Prospect region count</span>
       {regionCounts.map(r=><span key={r.region} className="pmap-legend-region">{r.region}<b>{r.leads}</b></span>)}
     </div>
   </div>
