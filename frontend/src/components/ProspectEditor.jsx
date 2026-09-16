@@ -29,13 +29,11 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
   return()=>{live=false}
  },[open,leadId])
  const set=(k,v)=>setForm(f=>({...f,[k]:v}))
- const perms=detail?.permissions||{}
  const save=async e=>{
   e.preventDefault(); if(!detail)return
-  const companyChanges=perms.can_edit_company?changed(form,detail.orig,COMPANY_FIELDS):{}
+  const companyChanges=changed(form,detail.orig,COMPANY_FIELDS)
   if('company_remarks' in companyChanges){companyChanges.remarks=companyChanges.company_remarks;delete companyChanges.company_remarks}
-  const leadChanges=perms.can_edit?changed(form,detail.orig,LEAD_FIELDS):{}
-  if(!perms.can_reassign)delete leadChanges.owner_id
+  const leadChanges=changed(form,detail.orig,LEAD_FIELDS)
   if('owner_id' in leadChanges)leadChanges.owner_id=Number(leadChanges.owner_id)
   if(!Object.keys(companyChanges).length&&!Object.keys(leadChanges).length){onToast?.({message:'No changes to save'});onClose();return}
   setSaving(true)
@@ -50,22 +48,20 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
   }finally{setSaving(false)}
  }
  const ownerOptions=form&&!users.some(u=>String(u.id)===form.owner_id)?[{id:form.owner_id,name:detail?.lead.owner_name||'Current owner',role:'current'},...users]:users
- const ro=!perms.can_edit_company
  return <Modal open={open} onClose={onClose} title="Edit prospect" eyebrow={detail?.lead.company_name||'Loading…'} size="xl">
   {error&&<div className="error-banner"><div><strong>Could not load this prospect</strong><span>{error}</span></div></div>}
   {!form&&!error&&<Spinner label="Loading prospect"/>}
   {form&&<form onSubmit={save}>
-   {!perms.can_edit&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
-   <div className="form-section"><h3>Company</h3>{ro&&perms.can_edit&&<p className="subtle">Your role cannot change company details.</p>}<div className="form-grid">
-    <Field label="Company name" required><Input required maxLength={220} disabled={ro} value={form.name} onChange={e=>set('name',e.target.value)}/></Field>
-    <Field label="Vertical" required><Input required maxLength={120} disabled={ro} value={form.vertical} onChange={e=>set('vertical',e.target.value)} placeholder="e.g. Telecommunications"/></Field>
-    <Field label="Website"><Input disabled={ro} value={form.website} onChange={e=>set('website',e.target.value)} placeholder="https://company.com"/></Field>
-    <Field label="Company LinkedIn page"><Input disabled={ro} value={form.linkedin_url} onChange={e=>set('linkedin_url',e.target.value)} placeholder="https://linkedin.com/company/…"/></Field>
-    <Field label="Other link" hint="e.g. tender portal or article"><Input disabled={ro} value={form.external_url} onChange={e=>set('external_url',e.target.value)} placeholder="https://"/></Field>
-    <Field label="Company notes"><Input disabled={ro} value={form.company_remarks} onChange={e=>set('company_remarks',e.target.value)}/></Field>
+   <div className="form-section"><h3>Company</h3><div className="form-grid">
+    <Field label="Company name" required><Input required maxLength={220} value={form.name} onChange={e=>set('name',e.target.value)}/></Field>
+    <Field label="Vertical" required><Input required maxLength={120} value={form.vertical} onChange={e=>set('vertical',e.target.value)} placeholder="e.g. Telecommunications"/></Field>
+    <Field label="Website"><Input value={form.website} onChange={e=>set('website',e.target.value)} placeholder="https://company.com"/></Field>
+    <Field label="Company LinkedIn page"><Input value={form.linkedin_url} onChange={e=>set('linkedin_url',e.target.value)} placeholder="https://linkedin.com/company/…"/></Field>
+    <Field label="Other link" hint="e.g. tender portal or article"><Input value={form.external_url} onChange={e=>set('external_url',e.target.value)} placeholder="https://"/></Field>
+    <Field label="Company notes"><Input value={form.company_remarks} onChange={e=>set('company_remarks',e.target.value)}/></Field>
    </div></div>
-   <fieldset className="form-section plain-fieldset" disabled={!perms.can_edit}><h3>Prospect</h3><div className="form-grid">
-    <Field label="Owner" hint={perms.can_reassign?undefined:'Your role cannot reassign prospects.'}><Select disabled={!perms.can_reassign} value={form.owner_id} onChange={e=>set('owner_id',e.target.value)}>{ownerOptions.map(u=><option key={u.id} value={u.id}>{u.name}{u.role&&u.role!=='current'?` · ${u.role}`:''}</option>)}</Select></Field>
+   <div className="form-section"><h3>Prospect</h3><div className="form-grid">
+    <Field label="Owner"><Select value={form.owner_id} onChange={e=>set('owner_id',e.target.value)}>{ownerOptions.map(u=><option key={u.id} value={u.id}>{u.name}{u.role&&u.role!=='current'?` · ${u.role}`:''}</option>)}</Select></Field>
     <Field label="Signal"><Select value={form.temperature} onChange={e=>set('temperature',e.target.value)}>{['Hot','Warm','Cold'].map(x=><option key={x}>{x}</option>)}</Select></Field>
     <Field label="Status"><Select value={form.status} onChange={e=>set('status',e.target.value)}>{LEAD_STATUSES.map(x=><option key={x}>{x}</option>)}</Select></Field>
     <Field label="Source"><Select value={form.source} onChange={e=>set('source',e.target.value)}>{(LEAD_SOURCES.includes(form.source)?LEAD_SOURCES:[form.source,...LEAD_SOURCES]).map(x=><option key={x}>{x}</option>)}</Select></Field>
@@ -76,8 +72,8 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
     <Field label="State"><Input maxLength={100} value={form.state} onChange={e=>set('state',e.target.value)}/></Field>
     <Field label="City"><Input maxLength={100} value={form.city} onChange={e=>set('city',e.target.value)}/></Field>
     <Field label="Remarks" className="span-2"><Textarea value={form.remarks} onChange={e=>set('remarks',e.target.value)}/></Field>
-   </div></fieldset>
-   <div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>{(perms.can_edit||perms.can_edit_company)&&<Button type="submit" disabled={saving}>{saving?'Saving…':'Save changes'}</Button>}</div>
+   </div></div>
+   <div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving?'Saving…':'Save changes'}</Button></div>
   </form>}
  </Modal>
 }
