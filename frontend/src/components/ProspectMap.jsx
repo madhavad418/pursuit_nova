@@ -97,8 +97,6 @@ export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,f
     }
     return out
   },[locations])
-  // Named regions with prospects (prospects without a region are listed as Unassigned in the legend, not counted as a region)
-  const regionCount=regionCounts.filter(r=>r.region!=='Unassigned').length
 
   useEffect(()=>{
     if(!containerRef.current) return
@@ -173,7 +171,7 @@ export default function ProspectMap({locations=[],regionCounts=[],totalLeads=0,f
     <div className="pmap-info">
       <div className="pmap-info-label">Global Network</div>
       <div className="pmap-info-num">{totalLeads}<span>prospects</span></div>
-      {regionCount>0&&<div className="pmap-info-sub">{regionCount} {regionCount===1?'region':'regions'}</div>}
+      <div className="pmap-info-sub">Prospect region count</div>
     </div>
     <div className="pmap-controls">
       <button type="button" className="pmap-expand" onClick={()=>setExpanded(x=>!x)} title={expanded?'Minimise map':'Expand map'} aria-label={expanded?'Minimise map':'Expand map'} aria-pressed={expanded}>
