@@ -53,6 +53,15 @@
 .pmap-tip{background:rgba(1,47,98,.95)!important;border:1px solid rgba(0,212,255,.35)!important;border-radius:8px!important;color:#fff!important;font-size:11px!important;padding:7px 11px!important;box-shadow:0 6px 24px rgba(0,0,0,.45)!important;line-height:1.5!important}
 .pmap-tip strong{color:#00d4ff}
 .pmap-tip.leaflet-tooltip-top::before{border-top-color:rgba(1,47,98,.95)!important}
+/* Prospect editing */
+.plain-fieldset{border:0;margin:0;min-width:0;padding:18px 0}
+.plain-fieldset:disabled .input{background:#f5f8fa;color:var(--muted)}
+.input:disabled{background:#f5f8fa;color:var(--muted);cursor:not-allowed}
+.check-row{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:14px;color:var(--ink)}
+.modal-actions.split>span{flex:1}
+.contact-card{position:relative}
+.contact-card .contact-edit{position:absolute;top:6px;right:6px}
+.contact-links{display:flex;gap:10px;flex-wrap:wrap}
 /* MoM Word documents */
 .docx-picker{display:grid;gap:8px;margin-bottom:12px}
 .docx-drop{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:1.5px dashed #b9d3e1;background:#f6fafc;border-radius:10px;padding:12px 14px;color:var(--brand);cursor:pointer}
