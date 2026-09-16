@@ -859,6 +859,8 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     related=can_access_company_relationship(u,l["company_id"])
     perms={"can_edit":editable,"can_edit_company":related and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":related and "CONTACT_EDIT" in u["permissions"],
            "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_delete":editable and u["role"] in ("Super Admin","Admin")}
+    # Contact fields this role may not see or change (field permissions); the edit form keeps them locked
+    perms["locked_contact_fields"]=[f for f in ("name","designation","email","phone","linkedin_url") if not all(field_access(u,"contact",f))]
     return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
 
 @app.put("/api/leads/{lead_id}")
