@@ -9,7 +9,7 @@ def _parse(ts):
 
 def test_overview_last_edited_timestamp(client, login, csrf_headers):
     client.cookies.clear()
-    me = login(client, email='bd.lead@jsan.local')['user']
+    me = login(client, email='superadmin@jsan.local')['user']
     h = csrf_headers(client)
 
     # A brand-new prospect has not been edited yet, but knows when it was created
