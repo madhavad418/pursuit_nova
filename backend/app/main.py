@@ -45,6 +45,8 @@ from app.db import (
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
     org_settings, fx_rates, field_permissions, saved_views, dashboard_preferences, microsoft_integrations,
     kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
+    partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
+    partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -2113,6 +2115,651 @@ def import_leads_csv(file: UploadFile = File(...), u=Depends(require_csrf)):
                 ))
 
             audit(u["id"], "lead", lead_id, "IMPORT", {"company": company_name, "source": "csv"})
+            results["imported"] += 1
+
+        except IntegrityError as e:
+            results["errors"].append({"row": row_num, "message": f"Database error: {str(e)[:100]}"})
+            results["skipped"] += 1
+        except Exception as e:
+            results["errors"].append({"row": row_num, "message": str(e)[:150]})
+            results["skipped"] += 1
+
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Partnerships: a second, fully independent pipeline with the same features and
+# rules as Prospects (own tables — see app/db.py — so nothing here can ever
+# change a prospect, a company, a report or a dashboard number).
+# ══════════════════════════════════════════════════════════════════════════════
+
+def can_view_partnership(u, partnership_id: int) -> bool:
+    l=row(select(partnerships.c.owner_id).where(partnerships.c.id==partnership_id))
+    if not l: return False
+    if l["owner_id"] in scope_user_ids(u) or has_share("partnership", partnership_id, u["id"]): return True
+    if u["role"] == "Presales Lead":
+        if row(select(partner_actions.c.id).where(and_(partner_actions.c.partnership_id==partnership_id, partner_actions.c.assigned_to==u["id"])).limit(1)): return True
+        if row(select(partner_opportunity_team.c.opportunity_id).select_from(partner_opportunity_team.join(partner_opportunities, partner_opportunities.c.id==partner_opportunity_team.c.opportunity_id)).where(and_(partner_opportunities.c.partnership_id==partnership_id, partner_opportunity_team.c.user_id==u["id"])).limit(1)): return True
+    return False
+
+def can_edit_partnership(u, partnership_id: int) -> bool:
+    if "LEAD_EDIT" not in u["permissions"]: return False
+    l=row(select(partnerships.c.owner_id).where(partnerships.c.id==partnership_id))
+    return bool(l and (l["owner_id"] in scope_user_ids(u) or has_share("partnership", partnership_id, u["id"], True)))
+
+def can_view_partner_opp(u, opp_id: int) -> bool:
+    o=row(select(partner_opportunities.c.owner_id, partner_opportunities.c.presales_owner_id).where(partner_opportunities.c.id==opp_id))
+    if not o: return False
+    if o["owner_id"] in scope_user_ids(u) or o.get("presales_owner_id")==u["id"] or has_share("partner_opportunity", opp_id, u["id"]): return True
+    return bool(row(select(partner_opportunity_team.c.opportunity_id).where(and_(partner_opportunity_team.c.opportunity_id==opp_id, partner_opportunity_team.c.user_id==u["id"]))))
+
+def can_edit_partner_opp(u, opp_id: int) -> bool:
+    return "OPPORTUNITY_EDIT" in u["permissions"] and can_view_partner_opp(u, opp_id)
+
+def can_access_partner_company_relationship(u, company_id: int) -> bool:
+    if u.get("scope_type") == "all": return True
+    for lr in rows(select(partnerships.c.id).where(partnerships.c.company_id==company_id)):
+        if can_view_partnership(u, lr["id"]): return True
+    for op in rows(select(partner_opportunities.c.id).where(partner_opportunities.c.company_id==company_id)):
+        if can_view_partner_opp(u, op["id"]): return True
+    return False
+
+def partner_opportunity_rows(u):
+    puo=users.alias("puo"); pup=users.alias("pup")
+    stmt=select(partner_opportunities, partner_companies.c.name.label("company_name"), partner_companies.c.vertical, puo.c.name.label("owner_name"), pup.c.name.label("presales_owner_name"), partnerships.c.temperature).select_from(
+        partner_opportunities.join(partner_companies, partner_companies.c.id==partner_opportunities.c.company_id).join(partnerships, partnerships.c.id==partner_opportunities.c.partnership_id).join(puo, puo.c.id==partner_opportunities.c.owner_id).outerjoin(pup, pup.c.id==partner_opportunities.c.presales_owner_id)
+    )
+    base=rows(stmt.order_by(partner_opportunities.c.updated_at.desc()))
+    out=[]
+    for x in base:
+        if can_view_partner_opp(u,x["id"]):
+            try: x["age_days"]=(date.today()-x["created_at"].date()).days
+            except Exception: x["age_days"]=0
+            out.append(mask_fields(u,"opportunity",x))
+    return out
+
+def partnership_rows(u):
+    powner=users.alias("powner")
+    stmt=select(partnerships, partner_companies.c.name.label("company_name"), partner_companies.c.vertical, partner_companies.c.website, partner_companies.c.linkedin_url, partner_companies.c.external_url, powner.c.name.label("owner_name")).select_from(
+        partnerships.join(partner_companies, partner_companies.c.id==partnerships.c.company_id).join(powner, powner.c.id==partnerships.c.owner_id)
+    ).order_by(partnerships.c.updated_at.desc())
+    base=rows(stmt); out=[]
+    for x in base:
+        if can_view_partnership(u,x["id"]):
+            ct=row(select(partner_contacts.c.name).where(partner_contacts.c.company_id==x["company_id"]).order_by(partner_contacts.c.is_primary.desc(),partner_contacts.c.id).limit(1))
+            x["primary_contact"]=ct["name"] if ct else None
+            ac=row(select(func.count()).select_from(partner_actions).where(and_(partner_actions.c.partnership_id==x["id"], partner_actions.c.status.not_in(["Completed","Cancelled"]))))
+            x["open_actions"]=list(ac.values())[0] if ac else 0
+            x["last_activity"]=(x["updated_at"].date().isoformat() if x.get("updated_at") else None)
+            out.append(x)
+    temporder={"Hot":0,"Warm":1,"Cold":2}; out.sort(key=lambda x:(temporder.get(x["temperature"],9), str(x.get("updated_at"))), reverse=False)
+    return out
+
+def duplicate_partner_companies(name,website):
+    nn=normalize_name(name); domain=domain_from_url(website); candidates=[]
+    for c in rows(select(partner_companies).where(partner_companies.c.status!="Merged")):
+        score=0; reasons=[]
+        if nn and c["normalized_name"]==nn: score+=0.75; reasons.append("same normalized name")
+        elif nn and (nn in c["normalized_name"] or c["normalized_name"] in nn): score+=0.45; reasons.append("similar name")
+        if domain and c.get("domain")==domain: score+=0.55; reasons.append("same website domain")
+        if score>=0.45: candidates.append({"company":c,"score":round(min(score,1),2),"reasons":reasons})
+    return sorted(candidates,key=lambda x:x["score"],reverse=True)
+
+def partnership_visibility_condition(u):
+    owner_ids=scope_user_ids(u)
+    conds=[partnerships.c.owner_id.in_(owner_ids)]
+    shared=select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type=="partnership",record_shares.c.user_id==u["id"]))
+    conds.append(partnerships.c.id.in_(shared))
+    return or_(*conds)
+
+@app.post("/api/partner-companies")
+def create_partner_company(p:Payload,u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403,"Company edit permission required")
+    d=p.data
+    if not d.get("name") or not d.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
+    dups=duplicate_partner_companies(d["name"],d.get("website"))
+    if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Reuse the existing company or review duplicates.")
+    cid=execute(insert(partner_companies).values(name=d["name"].strip(),normalized_name=normalize_name(d["name"]),vertical=d["vertical"],website=d.get("website"),domain=domain_from_url(d.get("website")),linkedin_url=d.get("linkedin_url"),external_url=d.get("external_url"),region=d.get("region"),country=d.get("country"),state=d.get("state"),city=d.get("city"),remarks=d.get("remarks"),status="Active",created_by=u["id"]))
+    audit(u["id"],"partner_company",cid,"CREATE",d); return row(select(partner_companies).where(partner_companies.c.id==cid))
+
+@app.get("/api/partner-companies/{company_id}")
+def partner_company_detail(company_id:int,u=Depends(require_perm("COMPANY_VIEW"))):
+    c=row(select(partner_companies).where(partner_companies.c.id==company_id))
+    if not c: raise HTTPException(404,"Company not found")
+    rel=can_access_partner_company_relationship(u,company_id)
+    return {"company":c,"contacts":[mask_fields(u,"contact",x) for x in rows(select(partner_contacts).where(partner_contacts.c.company_id==company_id).order_by(partner_contacts.c.is_primary.desc(),partner_contacts.c.id))] if rel else [],"relationship_access":rel,"partnerships":[x for x in partnership_rows(u) if x["company_id"]==company_id],"opportunities":[x for x in partner_opportunity_rows(u) if x["company_id"]==company_id]}
+
+@app.put("/api/partner-companies/{company_id}")
+def update_partner_company(company_id:int,p:Payload,u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403,"Company edit permission required")
+    if not row(select(partner_companies.c.id).where(partner_companies.c.id==company_id)): raise HTTPException(404,"Company not found")
+    if not can_access_partner_company_relationship(u,company_id): raise HTTPException(403,"Company relationship edit denied")
+    d=p.data; vals={k:d[k] for k in ("name","vertical","website","linkedin_url","external_url","region","country","state","city","remarks","status") if k in d}
+    for k in ("name","vertical"):
+        if k in vals:
+            vals[k]=_clean_text(vals[k],220 if k=="name" else None)
+            if not vals[k]: raise HTTPException(400,f"Company {k} is required")
+    for k,label,n in (("region","Region",80),("country","Country",100),("state","State",100),("city","City",100),("remarks","Company notes",None)):
+        if k in vals: vals[k]=_clean_text(vals[k],n)
+    for k,label in (("website","Website"),("linkedin_url","Company LinkedIn page"),("external_url","Other link")):
+        if k in vals: vals[k]=_clean_url(vals[k],label)
+    if "name" in vals:
+        vals["normalized_name"]=normalize_name(vals["name"])
+        clash=row(select(partner_companies.c.id,partner_companies.c.name).where(and_(partner_companies.c.normalized_name==vals["normalized_name"],partner_companies.c.id!=company_id,partner_companies.c.status!="Merged")))
+        if clash: raise HTTPException(409,f"Another company is already named {clash['name']}")
+    if "website" in vals: vals["domain"]=domain_from_url(vals["website"])
+    vals["updated_at"]=utcnow(); execute(update(partner_companies).where(partner_companies.c.id==company_id).values(**vals)); audit(u["id"],"partner_company",company_id,"UPDATE",d); return row(select(partner_companies).where(partner_companies.c.id==company_id))
+
+@app.post("/api/partner-companies/{company_id}/contacts")
+def add_partner_contact(company_id:int,p:Payload,u=Depends(require_csrf)):
+    if "CONTACT_EDIT" not in u["permissions"]: raise HTTPException(403,"Contact edit permission required")
+    if not can_access_partner_company_relationship(u,company_id): raise HTTPException(403,"Company relationship access denied")
+    d=p.data; ensure_fields_editable(u,"contact",d)
+    if not d.get("name"): raise HTTPException(400,"Contact name is required")
+    ne=normalize_email(d.get("email"))
+    if ne and row(select(partner_contacts.c.id).where(and_(partner_contacts.c.company_id==company_id,partner_contacts.c.normalized_email==ne,partner_contacts.c.active==True))): raise HTTPException(409,"A contact with this email already exists for the company")
+    cid=execute(insert(partner_contacts).values(company_id=company_id,name=d["name"],designation=d.get("designation"),department=d.get("department"),email=d.get("email"),normalized_email=ne,phone=d.get("phone"),linkedin_url=d.get("linkedin_url"),location=d.get("location"),remarks=d.get("remarks"),is_primary=bool(d.get("is_primary")),active=True,created_by=u["id"]))
+    audit(u["id"],"partner_contact",cid,"CREATE",d); return mask_fields(u,"contact",row(select(partner_contacts).where(partner_contacts.c.id==cid)))
+
+@app.put("/api/partner-contacts/{contact_id}")
+def update_partner_contact(contact_id:int,p:Payload,u=Depends(require_csrf)):
+    if "CONTACT_EDIT" not in u["permissions"]: raise HTTPException(403,"Contact edit permission required")
+    cr=row(select(partner_contacts.c.company_id).where(partner_contacts.c.id==contact_id))
+    if not cr: raise HTTPException(404,"Contact not found")
+    if not can_access_partner_company_relationship(u,int(cr["company_id"])): raise HTTPException(403,"Contact relationship access denied")
+    d=p.data; ensure_fields_editable(u,"contact",d); vals={k:d[k] for k in ("name","designation","department","email","phone","linkedin_url","location","remarks","is_primary","active") if k in d}
+    if "name" in vals:
+        vals["name"]=_clean_text(vals["name"],180)
+        if not vals["name"]: raise HTTPException(400,"Contact name is required")
+    for k,n in (("designation",180),("department",120),("phone",80),("location",220),("remarks",None)):
+        if k in vals: vals[k]=_clean_text(vals[k],n)
+    if "linkedin_url" in vals: vals["linkedin_url"]=_clean_url(vals["linkedin_url"],"LinkedIn profile")
+    if "email" in vals:
+        vals["email"]=_clean_text(vals["email"],190)
+        if vals["email"] and ("@" not in vals["email"] or " " in vals["email"]): raise HTTPException(400,"Email address is not valid")
+        vals["normalized_email"]=normalize_email(vals["email"])
+        if vals["normalized_email"] and row(select(partner_contacts.c.id).where(and_(partner_contacts.c.company_id==cr["company_id"],partner_contacts.c.normalized_email==vals["normalized_email"],partner_contacts.c.active==True,partner_contacts.c.id!=contact_id))):
+            raise HTTPException(409,"Another contact at this company already uses this email")
+    if "is_primary" in vals: vals["is_primary"]=bool(vals["is_primary"])
+    if "active" in vals: vals["active"]=bool(vals["active"])
+    if vals.get("is_primary"): execute(update(partner_contacts).where(and_(partner_contacts.c.company_id==cr["company_id"],partner_contacts.c.id!=contact_id)).values(is_primary=False,updated_at=utcnow()))
+    vals["updated_at"]=utcnow(); execute(update(partner_contacts).where(partner_contacts.c.id==contact_id).values(**vals)); audit(u["id"],"partner_contact",contact_id,"UPDATE",d); return mask_fields(u,"contact",row(select(partner_contacts).where(partner_contacts.c.id==contact_id)))
+
+@app.post("/api/partnerships/full")
+def create_partnership_full(p:Payload,u=Depends(require_csrf)):
+    if "LEAD_CREATE" not in u["permissions"]: raise HTTPException(403,"Lead create permission required")
+    d=p.data; l=d.get("lead") or {}; owner_id=int(l.get("owner_id") or u["id"])
+    if not can_assign(u,owner_id): raise HTTPException(403,"You cannot assign this partnership to that user")
+    company_id=d.get("company_id")
+    if company_id:
+        if not row(select(partner_companies.c.id).where(partner_companies.c.id==int(company_id))): raise HTTPException(404,"Company not found")
+        company_id=int(company_id)
+    else:
+        comp=d.get("company") or {}
+        if not comp.get("name") or not comp.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
+        dups=duplicate_partner_companies(comp["name"],comp.get("website"))
+        if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Select the existing company.")
+        company_id=execute(insert(partner_companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=comp["vertical"],website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
+    partnership_id=execute(insert(partnerships).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
+    for idx,ct in enumerate(d.get("contacts") or []):
+        if ct.get("name"):
+            ne=normalize_email(ct.get("email"))
+            if ne and row(select(partner_contacts.c.id).where(and_(partner_contacts.c.company_id==company_id,partner_contacts.c.normalized_email==ne,partner_contacts.c.active==True))): continue
+            execute(insert(partner_contacts).values(company_id=company_id,name=ct["name"],designation=ct.get("designation"),department=ct.get("department"),email=ct.get("email"),normalized_email=ne,phone=ct.get("phone"),linkedin_url=ct.get("linkedin_url"),location=ct.get("location"),remarks=ct.get("remarks"),is_primary=bool(ct.get("is_primary") or idx==0),active=True,created_by=u["id"]))
+    audit(u["id"],"partnership",partnership_id,"CREATE",{"company_id":company_id,"owner_id":owner_id}); return partnership_detail(partnership_id,u)
+
+@app.get("/api/partnerships")
+def list_partnerships(u=Depends(require_perm("LEAD_VIEW"))): return partnership_rows(u)
+
+@app.get("/api/partnerships/{partnership_id}")
+def partnership_detail(partnership_id:int,u=Depends(require_perm("LEAD_VIEW"))):
+    if not can_view_partnership(u,partnership_id): raise HTTPException(403,"You do not have access to this partnership")
+    powner=users.alias("powner2")
+    l=row(select(partnerships,partner_companies.c.name.label("company_name"),partner_companies.c.vertical,partner_companies.c.website,partner_companies.c.linkedin_url,partner_companies.c.external_url,partner_companies.c.remarks.label("company_remarks"),powner.c.name.label("owner_name")).select_from(partnerships.join(partner_companies,partner_companies.c.id==partnerships.c.company_id).join(powner,powner.c.id==partnerships.c.owner_id)).where(partnerships.c.id==partnership_id))
+    cts=[mask_fields(u,"contact",x) for x in rows(select(partner_contacts).where(and_(partner_contacts.c.company_id==l["company_id"],partner_contacts.c.active==True)).order_by(partner_contacts.c.is_primary.desc(),partner_contacts.c.id))]
+    mts=rows(select(partner_meetings).where(partner_meetings.c.partnership_id==partnership_id).order_by(partner_meetings.c.meeting_date.desc(),partner_meetings.c.id.desc()))
+    ms=rows(select(partner_moms).where(partner_moms.c.partnership_id==partnership_id).order_by(partner_moms.c.id.desc()))
+    att_by_mom={}
+    for a in rows(select(partner_mom_attachments.c.id,partner_mom_attachments.c.mom_id,partner_mom_attachments.c.filename,partner_mom_attachments.c.size_bytes,partner_mom_attachments.c.uploaded_by,partner_mom_attachments.c.created_at,users.c.name.label("uploaded_by_name")).select_from(partner_mom_attachments.join(users,users.c.id==partner_mom_attachments.c.uploaded_by)).where(partner_mom_attachments.c.partnership_id==partnership_id).order_by(partner_mom_attachments.c.id)):
+        a["can_delete"]=a["uploaded_by"]==u["id"] or u["role"] in ("Super Admin","Admin")
+        att_by_mom.setdefault(a["mom_id"],[]).append(a)
+    for mo in ms: mo["attachments"]=att_by_mom.get(mo["id"],[])
+    paa=users.alias("paa")
+    acts=rows(select(partner_actions,paa.c.name.label("assigned_to_name")).select_from(partner_actions.join(paa,paa.c.id==partner_actions.c.assigned_to)).where(partner_actions.c.partnership_id==partnership_id).order_by(partner_actions.c.due_date,partner_actions.c.id.desc()))
+    for a in acts: a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<today_str()
+    opps=[x for x in partner_opportunity_rows(u) if x["partnership_id"]==partnership_id]
+    fs=[]
+    for o in opps:
+        ff=rows(select(partner_followups).where(partner_followups.c.opportunity_id==o["id"]).order_by(partner_followups.c.follow_up_date.desc(),partner_followups.c.id.desc()))
+        for f in ff: f["opportunity_name"]=o["name"]; f["owner_name"]=user_name(f["owner_id"])
+        fs.extend(ff)
+    docs=rows(select(documents).where(or_(and_(documents.c.entity_type=="partnership",documents.c.entity_id==partnership_id),and_(documents.c.entity_type=="partner_company",documents.c.entity_id==l["company_id"]))).order_by(documents.c.id.desc()))
+    timeline=[]
+    for m in mts: timeline.append({"date":m["meeting_date"],"type":"Meeting","title":m["meeting_type"],"detail":m.get("remarks") or m.get("purpose")})
+    for mo in ms: timeline.append({"date":str(mo["created_at"])[:10],"type":"MoM","title":"Minutes of Meeting","detail":mo.get("summary")})
+    for a in acts: timeline.append({"date":a["action_date"],"type":"Action","title":a["description"],"detail":f"{a['assigned_to_name']} · {a['status']} · due {a['due_date']}"})
+    for o in opps: timeline.append({"date":str(o["created_at"])[:10],"type":"Opportunity","title":o["name"],"detail":f"{o['status']} · {o['forecast_category']}"})
+    for f in fs: timeline.append({"date":f["follow_up_date"],"type":"Follow-up","title":f["opportunity_name"],"detail":f.get("response") or f.get("remarks")})
+    timeline.sort(key=lambda x:x["date"] or "",reverse=True)
+    last_edit=row(select(func.max(audit_logs.c.created_at).label("at")).where(and_(audit_logs.c.action=="UPDATE",or_(
+        and_(audit_logs.c.entity_type=="partnership",audit_logs.c.entity_id==partnership_id),
+        and_(audit_logs.c.entity_type=="partner_company",audit_logs.c.entity_id==l["company_id"])))))
+    l["last_edited_at"]=iso_utc((last_edit or {}).get("at"))
+    l["created_at_utc"]=iso_utc(l.get("created_at"))
+    editable=can_edit_partnership(u,partnership_id)
+    related=can_access_partner_company_relationship(u,l["company_id"])
+    perms={"can_edit":editable,"can_edit_company":related and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":related and "CONTACT_EDIT" in u["permissions"],
+           "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_delete":editable and u["role"] in ("Super Admin","Admin")}
+    perms["locked_contact_fields"]=[f for f in ("name","designation","email","phone","linkedin_url") if not all(field_access(u,"contact",f))]
+    return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
+
+@app.put("/api/partnerships/{partnership_id}")
+def update_partnership(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if not can_edit_partnership(u,partnership_id): raise HTTPException(403,"You cannot edit this partnership")
+    d=p.data; vals={k:d[k] for k in ("temperature","source","source_detail","status","region","country","state","city","next_follow_up","remarks") if k in d}
+    if "temperature" in vals and vals["temperature"] not in LEAD_TEMPERATURES: raise HTTPException(400,"Signal must be Hot, Warm or Cold")
+    if "status" in vals and vals["status"] not in LEAD_STATUSES: raise HTTPException(400,"Invalid partnership status")
+    if "source" in vals:
+        vals["source"]=_clean_text(vals["source"],80)
+        if not vals["source"]: raise HTTPException(400,"Source is required")
+    for k,n in (("source_detail",255),("region",80),("country",100),("state",100),("city",100),("remarks",None)):
+        if k in vals: vals[k]=_clean_text(vals[k],n)
+    if "next_follow_up" in vals:
+        nf=_clean_text(vals["next_follow_up"])
+        if nf:
+            try: nf=datetime.strptime(nf,"%Y-%m-%d").strftime("%Y-%m-%d")
+            except ValueError: raise HTTPException(400,"Next follow-up must be a valid date")
+        vals["next_follow_up"]=nf
+    if "owner_id" in d:
+        oid=int(d["owner_id"])
+        if "LEAD_REASSIGN" not in u["permissions"] or not can_assign(u,oid): raise HTTPException(403,"You cannot reassign this partnership")
+        vals["owner_id"]=oid
+    vals["updated_at"]=utcnow(); execute(update(partnerships).where(partnerships.c.id==partnership_id).values(**vals)); audit(u["id"],"partnership",partnership_id,"UPDATE",d); return partnership_detail(partnership_id,u)
+
+@app.delete("/api/partnerships/{partnership_id}")
+def delete_partnership(partnership_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete partnerships")
+    l=row(select(partnerships,partner_companies.c.name.label("company_name")).select_from(partnerships.join(partner_companies,partner_companies.c.id==partnerships.c.company_id)).where(partnerships.c.id==partnership_id))
+    if not l: raise HTTPException(404,"Partnership not found")
+    if not can_edit_partnership(u,partnership_id): raise HTTPException(403,"You cannot delete this partnership")
+    opp_ids=[r["id"] for r in rows(select(partner_opportunities.c.id).where(partner_opportunities.c.partnership_id==partnership_id))]
+    if opp_ids:
+        execute(delete(partner_followups).where(partner_followups.c.opportunity_id.in_(opp_ids)))
+        execute(delete(partner_opportunity_team).where(partner_opportunity_team.c.opportunity_id.in_(opp_ids)))
+        execute(delete(partner_opportunities).where(partner_opportunities.c.partnership_id==partnership_id))
+    execute(delete(partner_actions).where(partner_actions.c.partnership_id==partnership_id))
+    execute(delete(partner_mom_attachments).where(partner_mom_attachments.c.partnership_id==partnership_id))
+    execute(delete(partner_moms).where(partner_moms.c.partnership_id==partnership_id))
+    execute(delete(partner_meetings).where(partner_meetings.c.partnership_id==partnership_id))
+    execute(delete(record_shares).where(and_(record_shares.c.entity_type=="partnership",record_shares.c.entity_id==partnership_id)))
+    execute(delete(partnerships).where(partnerships.c.id==partnership_id))
+    audit(u["id"],"partnership",partnership_id,"DELETE",{"company_name":l.get("company_name","")}); return {"ok":True}
+
+@app.post("/api/partnerships/{partnership_id}/share")
+def share_partnership(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if "SHARE_RECORD" not in u["permissions"] or not can_view_partnership(u,partnership_id): raise HTTPException(403,"Record-share permission required")
+    target=int(p.data.get("user_id")); level=p.data.get("access_level") or "view"
+    if not is_super(u) and org_root(target)!=org_root(u["id"]): raise HTTPException(403,"Records can only be shared within your own organisation")
+    with engine.begin() as c:
+        existing=c.execute(select(record_shares.c.id).where(and_(record_shares.c.entity_type=="partnership",record_shares.c.entity_id==partnership_id,record_shares.c.user_id==target))).fetchone()
+        if existing: c.execute(update(record_shares).where(record_shares.c.id==existing.id).values(access_level=level))
+        else: c.execute(insert(record_shares).values(entity_type="partnership",entity_id=partnership_id,user_id=target,access_level=level,created_by=u["id"]))
+    audit(u["id"],"partnership",partnership_id,"SHARE",{"user_id":target,"access_level":level}); return {"ok":True}
+
+@app.post("/api/partnerships/{partnership_id}/meetings")
+def add_partner_meeting(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if "MEETING_EDIT" not in u["permissions"] or not can_view_partnership(u,partnership_id): raise HTTPException(403,"Meeting permission denied")
+    d=p.data
+    if not d.get("meeting_date") or not d.get("meeting_type"): raise HTTPException(400,"Meeting date and type are required")
+    mid=execute(insert(partner_meetings).values(partnership_id=partnership_id,opportunity_id=d.get("opportunity_id") or None,meeting_date=d["meeting_date"],meeting_time=d.get("meeting_time"),meeting_type=d["meeting_type"],status=d.get("status") or "Scheduled",purpose=d.get("purpose"),customer_participants=d.get("customer_participants"),jsan_participants=d.get("jsan_participants"),remarks=d.get("remarks"),created_by=u["id"]))
+    execute(update(partnerships).where(partnerships.c.id==partnership_id).values(updated_at=utcnow())); audit(u["id"],"partner_meeting",mid,"CREATE",d); return row(select(partner_meetings).where(partner_meetings.c.id==mid))
+
+@app.post("/api/partnerships/{partnership_id}/moms")
+def add_partner_mom(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if "MEETING_EDIT" not in u["permissions"] or not can_view_partnership(u,partnership_id): raise HTTPException(403,"MoM permission denied")
+    d=p.data
+    if not d.get("summary"): raise HTTPException(400,"Discussion summary is required")
+    mid=execute(insert(partner_moms).values(meeting_id=d.get("meeting_id") or None,partnership_id=partnership_id,summary=d["summary"],customer_requirements=d.get("customer_requirements"),jsan_commitments=d.get("jsan_commitments"),customer_commitments=d.get("customer_commitments"),risks=d.get("risks"),next_steps=d.get("next_steps"),follow_up_date=d.get("follow_up_date"),created_by=u["id"]))
+    if d.get("follow_up_date"): execute(update(partnerships).where(partnerships.c.id==partnership_id).values(next_follow_up=d["follow_up_date"],updated_at=utcnow()))
+    audit(u["id"],"partner_mom",mid,"CREATE",d); return row(select(partner_moms).where(partner_moms.c.id==mid))
+
+def _partner_mom_for(u,mom_id:int):
+    m=row(select(partner_moms.c.id,partner_moms.c.partnership_id).where(partner_moms.c.id==mom_id))
+    if not m or not can_view_partnership(u,m["partnership_id"]): raise HTTPException(404,"Minutes of Meeting not found")
+    return m
+
+@app.post("/api/partner-moms/{mom_id}/attachments")
+def upload_partner_mom_attachment(mom_id:int,file:UploadFile=File(...),u=Depends(require_csrf)):
+    if "MEETING_EDIT" not in u["permissions"]: raise HTTPException(403,"MoM permission denied")
+    m=_partner_mom_for(u,mom_id)
+    count=(row(select(func.count().label("n")).select_from(partner_mom_attachments).where(partner_mom_attachments.c.mom_id==mom_id)) or {}).get("n",0)
+    if count>=MOM_ATTACHMENTS_PER_MOM: raise HTTPException(400,f"A MoM can have at most {MOM_ATTACHMENTS_PER_MOM} attachments")
+    data=file.file.read(MOM_ATTACHMENT_MAX_BYTES+1)
+    filename=_clean_filename(file.filename)
+    _validate_docx(filename,data)
+    digest=hashlib.sha256(data).hexdigest()
+    aid=execute(insert(partner_mom_attachments).values(mom_id=mom_id,partnership_id=m["partnership_id"],filename=filename,content_type=DOCX_MIME,size_bytes=len(data),sha256=digest,data=data,uploaded_by=u["id"]))
+    audit(u["id"],"partner_mom_attachment",aid,"CREATE",{"mom_id":mom_id,"filename":filename,"size_bytes":len(data),"sha256":digest})
+    return {"id":aid,"mom_id":mom_id,"filename":filename,"size_bytes":len(data),"uploaded_by":u["id"],"uploaded_by_name":u["name"],"can_delete":True}
+
+@app.get("/api/partner-moms/{mom_id}/attachments/{attachment_id}")
+def download_partner_mom_attachment(mom_id:int,attachment_id:int,u=Depends(require_perm("LEAD_VIEW"))):
+    _partner_mom_for(u,mom_id)
+    a=row(select(partner_mom_attachments).where(and_(partner_mom_attachments.c.id==attachment_id,partner_mom_attachments.c.mom_id==mom_id)))
+    if not a: raise HTTPException(404,"Attachment not found")
+    from urllib.parse import quote
+    ascii_name="".join(ch if ch.isascii() and ch.isprintable() and ch not in '"\\;' else "_" for ch in a["filename"])
+    return Response(content=bytes(a["data"]),media_type=DOCX_MIME,headers={
+        "Content-Disposition":f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(a['filename'])}",
+        "Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
+
+@app.delete("/api/partner-moms/{mom_id}/attachments/{attachment_id}")
+def delete_partner_mom_attachment(mom_id:int,attachment_id:int,u=Depends(require_csrf)):
+    _partner_mom_for(u,mom_id)
+    a=row(select(partner_mom_attachments.c.id,partner_mom_attachments.c.filename,partner_mom_attachments.c.uploaded_by).where(and_(partner_mom_attachments.c.id==attachment_id,partner_mom_attachments.c.mom_id==mom_id)))
+    if not a: raise HTTPException(404,"Attachment not found")
+    if a["uploaded_by"]!=u["id"] and u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only the uploader, Super Admin or Admin can remove this file")
+    execute(delete(partner_mom_attachments).where(partner_mom_attachments.c.id==attachment_id))
+    audit(u["id"],"partner_mom_attachment",attachment_id,"DELETE",{"mom_id":mom_id,"filename":a["filename"]}); return {"ok":True}
+
+@app.post("/api/partnerships/{partnership_id}/actions")
+def add_partner_action(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if "ACTION_EDIT" not in u["permissions"] or not can_view_partnership(u,partnership_id): raise HTTPException(403,"Action permission denied")
+    d=p.data; assigned=int(d.get("assigned_to") or u["id"])
+    if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
+    if not d.get("description") or not d.get("due_date"): raise HTTPException(400,"Action description and due date are required")
+    aid=execute(insert(partner_actions).values(partnership_id=partnership_id,opportunity_id=d.get("opportunity_id") or None,action_date=d.get("action_date") or today_str(),description=d["description"],assigned_to=assigned,due_date=d["due_date"],status=d.get("status") or "Open",priority=d.get("priority") or "Medium",remarks=d.get("remarks"),created_by=u["id"]))
+    execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="New action assigned",message=d["description"],entity_type="partner_action",entity_id=aid,due_date=d["due_date"],severity="info")); audit(u["id"],"partner_action",aid,"CREATE",d); return row(select(partner_actions).where(partner_actions.c.id==aid))
+
+@app.put("/api/partner-actions/{action_id}")
+def update_partner_action(action_id:int,p:Payload,u=Depends(require_csrf)):
+    a=row(select(partner_actions).where(partner_actions.c.id==action_id))
+    if not a: raise HTTPException(404,"Action not found")
+    if "ACTION_EDIT" not in u["permissions"] or (a["assigned_to"]!=u["id"] and not can_edit_partnership(u,a["partnership_id"])): raise HTTPException(403,"You cannot update this action")
+    d=p.data; vals={k:d[k] for k in ("description","assigned_to","due_date","status","priority","remarks","completion_date") if k in d}
+    if d.get("status")=="Completed" and not d.get("completion_date"): vals["completion_date"]=today_str()
+    vals["updated_at"]=utcnow(); execute(update(partner_actions).where(partner_actions.c.id==action_id).values(**vals)); audit(u["id"],"partner_action",action_id,"UPDATE",d); return row(select(partner_actions).where(partner_actions.c.id==action_id))
+
+@app.delete("/api/partner-actions/{action_id}")
+def delete_partner_action(action_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete actions")
+    a=row(select(partner_actions).where(partner_actions.c.id==action_id))
+    if not a: raise HTTPException(404,"Action not found")
+    execute(delete(partner_actions).where(partner_actions.c.id==action_id))
+    audit(u["id"],"partner_action",action_id,"DELETE",{"description":a["description"]}); return {"ok":True}
+
+@app.get("/api/partner-opportunities/{opp_id}")
+def partner_opportunity_detail(opp_id:int,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
+    if not can_view_partner_opp(u,opp_id): raise HTTPException(403,"Opportunity access denied")
+    os_=[x for x in partner_opportunity_rows(u) if x["id"]==opp_id]
+    if not os_: raise HTTPException(404,"Opportunity not found")
+    fs=rows(select(partner_followups).where(partner_followups.c.opportunity_id==opp_id).order_by(partner_followups.c.follow_up_date.desc(),partner_followups.c.id.desc()))
+    for f in fs: f["owner_name"]=user_name(f["owner_id"])
+    tm=rows(select(partner_opportunity_team.c.user_id,partner_opportunity_team.c.team_role,users.c.name,roles.c.name.label("role")).select_from(partner_opportunity_team.join(users,users.c.id==partner_opportunity_team.c.user_id).join(roles,roles.c.id==users.c.role_id)).where(partner_opportunity_team.c.opportunity_id==opp_id))
+    docs=rows(select(documents).where(and_(documents.c.entity_type=="partner_opportunity",documents.c.entity_id==opp_id)).order_by(documents.c.id.desc()))
+    return {"opportunity":os_[0],"followups":fs,"team":tm,"documents":docs}
+
+@app.post("/api/partnerships/{partnership_id}/opportunities")
+def add_partner_opportunity(partnership_id:int,p:Payload,u=Depends(require_csrf)):
+    if "OPPORTUNITY_EDIT" not in u["permissions"] or not can_view_partnership(u,partnership_id): raise HTTPException(403,"Opportunity permission denied")
+    d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(partnerships.c.company_id,partnerships.c.owner_id).where(partnerships.c.id==partnership_id)); owner=int(d.get("owner_id") or l["owner_id"])
+    if not can_assign(u,owner): raise HTTPException(403,"You cannot assign this opportunity to that user")
+    if not d.get("name"): raise HTTPException(400,"Opportunity name is required")
+    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=float(d.get("amount") or 0); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
+    oid=execute(insert(partner_opportunities).values(partnership_id=partnership_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=d.get("currency") or "USD",probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
+    if d.get("presales_owner_id"):
+        execute(insert(partner_opportunity_team).values(opportunity_id=oid,user_id=int(d["presales_owner_id"]),team_role="Presales Owner",created_by=u["id"]))
+    execute(update(partnerships).where(partnerships.c.id==partnership_id).values(status="Qualified",updated_at=utcnow())); audit(u["id"],"partner_opportunity",oid,"CREATE",d); return partner_opportunity_detail(oid,u)
+
+@app.put("/api/partner-opportunities/{opp_id}")
+def update_partner_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
+    if not can_edit_partner_opp(u,opp_id): raise HTTPException(403,"You cannot edit this opportunity")
+    old=row(select(partner_opportunities).where(partner_opportunities.c.id==opp_id)); d=p.data; ensure_fields_editable(u,"opportunity",d)
+    if "owner_id" in d and int(d["owner_id"]) != int(old["owner_id"]):
+        if not can_assign(u, int(d["owner_id"])): raise HTTPException(403,"You cannot assign this opportunity to that user")
+    merged={**old,**d}; status=merged["status"]
+    if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
+    validate_outcome(status,merged)
+    vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
+    amount=float(vals.get("amount",old["amount"]) or 0); prob=float(vals.get("probability",old["probability"]) or 0); vals["weighted_value"]=amount*prob/100
+    if "forecast_category" not in d and "status" in d: vals["forecast_category"]=forecast_from_status(status)
+    vals["closed_at"]=today_str() if status.startswith("Closed ") else None; vals["updated_at"]=utcnow(); execute(update(partner_opportunities).where(partner_opportunities.c.id==opp_id).values(**vals))
+    if d.get("presales_owner_id"):
+        pid=int(d["presales_owner_id"])
+        if not row(select(partner_opportunity_team.c.opportunity_id).where(and_(partner_opportunity_team.c.opportunity_id==opp_id,partner_opportunity_team.c.user_id==pid))): execute(insert(partner_opportunity_team).values(opportunity_id=opp_id,user_id=pid,team_role="Presales Owner",created_by=u["id"]))
+    audit(u["id"],"partner_opportunity",opp_id,"UPDATE",d); return partner_opportunity_detail(opp_id,u)
+
+@app.post("/api/partner-opportunities/{opp_id}/followups")
+def add_partner_followup(opp_id:int,p:Payload,u=Depends(require_csrf)):
+    if not can_edit_partner_opp(u,opp_id): raise HTTPException(403,"Opportunity access denied")
+    d=p.data; fd=d.get("follow_up_date") or today_str(); oid=int(d.get("owner_id") or u["id"])
+    fid=execute(insert(partner_followups).values(opportunity_id=opp_id,follow_up_date=fd,owner_id=oid,response=d.get("response"),next_follow_up_date=d.get("next_follow_up_date"),remarks=d.get("remarks"),created_by=u["id"]))
+    old=row(select(partner_opportunities.c.follow_up_count).where(partner_opportunities.c.id==opp_id)); execute(update(partner_opportunities).where(partner_opportunities.c.id==opp_id).values(last_follow_up_date=fd,next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=(old["follow_up_count"] or 0)+1,updated_at=utcnow())); audit(u["id"],"partner_followup",fid,"CREATE",d); return partner_opportunity_detail(opp_id,u)
+
+@app.post("/api/partner-opportunities/{opp_id}/team")
+def add_partner_team_member(opp_id:int,p:Payload,u=Depends(require_csrf)):
+    if not can_edit_partner_opp(u,opp_id): raise HTTPException(403,"Opportunity access denied")
+    uid=int(p.data["user_id"]); role=p.data.get("team_role") or "Contributor"
+    if not can_assign(u,uid): raise HTTPException(403,"You cannot add that user to this opportunity team")
+    with engine.begin() as c:
+        ex=c.execute(select(partner_opportunity_team.c.opportunity_id).where(and_(partner_opportunity_team.c.opportunity_id==opp_id,partner_opportunity_team.c.user_id==uid))).fetchone()
+        if ex: c.execute(update(partner_opportunity_team).where(and_(partner_opportunity_team.c.opportunity_id==opp_id,partner_opportunity_team.c.user_id==uid)).values(team_role=role))
+        else: c.execute(insert(partner_opportunity_team).values(opportunity_id=opp_id,user_id=uid,team_role=role,created_by=u["id"]))
+    audit(u["id"],"partner_opportunity",opp_id,"TEAM_UPDATE",p.data); return partner_opportunity_detail(opp_id,u)
+
+@app.get("/api/query/partner-companies")
+def query_partner_companies(q:str="",vertical:str="",region:str="",page:int=1,page_size:int=25,u=Depends(require_perm("COMPANY_VIEW"))):
+    page=max(1,page); page_size=min(max(1,page_size),100)
+    contact_count=select(func.count(partner_contacts.c.id)).where(and_(partner_contacts.c.company_id==partner_companies.c.id,partner_contacts.c.active==True)).correlate(partner_companies).scalar_subquery()
+    lead_count=select(func.count(partnerships.c.id)).where(partnerships.c.company_id==partner_companies.c.id).correlate(partner_companies).scalar_subquery()
+    opp_count=select(func.count(partner_opportunities.c.id)).where(partner_opportunities.c.company_id==partner_companies.c.id).correlate(partner_companies).scalar_subquery()
+    stmt=select(partner_companies,contact_count.label("contact_count"),lead_count.label("lead_count"),opp_count.label("opportunity_count")).where(partner_companies.c.status!="Merged")
+    filters=[]
+    if q: filters.append(or_(func.lower(partner_companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(partner_companies.c.website," ")).like(f"%{q.lower()}%"),func.lower(func.coalesce(partner_companies.c.vertical," ")).like(f"%{q.lower()}%")))
+    if vertical: filters.append(partner_companies.c.vertical==vertical)
+    if region: filters.append(partner_companies.c.region==region)
+    if filters: stmt=stmt.where(*filters)
+    total_stmt=select(func.count()).select_from(select(partner_companies.c.id).where(partner_companies.c.status!="Merged",*filters).subquery())
+    n=row(total_stmt); n=list(n.values())[0] if n else 0
+    items=rows(stmt.order_by(partner_companies.c.name).offset((page-1)*page_size).limit(page_size))
+    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size}
+
+@app.get("/api/query/partnerships")
+def query_partnerships(q:str="",status:str="",temperature:str="",owner_id:int|None=None,region:str="",followup:str="",sort:str="",dir:str="asc",page:int=1,page_size:int=25,u=Depends(require_perm("LEAD_VIEW"))):
+    page=max(1,page); page_size=min(max(1,page_size),100); powner=users.alias("qpowner")
+    primary=select(partner_contacts.c.name).where(and_(partner_contacts.c.company_id==partnerships.c.company_id,partner_contacts.c.active==True)).order_by(partner_contacts.c.is_primary.desc(),partner_contacts.c.id).limit(1).correlate(partnerships).scalar_subquery()
+    joined=partnerships.join(partner_companies,partner_companies.c.id==partnerships.c.company_id).join(powner,powner.c.id==partnerships.c.owner_id)
+    base=select(partnerships,partner_companies.c.name.label("company_name"),partner_companies.c.vertical,powner.c.name.label("owner_name"),primary.label("primary_contact")).select_from(joined).where(partnership_visibility_condition(u))
+    common=[]
+    if q: common.append(or_(func.lower(partner_companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(partnerships.c.remarks," ")).like(f"%{q.lower()}%"),func.lower(powner.c.name).like(f"%{q.lower()}%")))
+    if status: common.append(partnerships.c.status==status)
+    if owner_id: common.append(partnerships.c.owner_id==owner_id)
+    if region=="__none__": common.append(or_(partnerships.c.region.is_(None),partnerships.c.region==""))
+    elif region: common.append(partnerships.c.region==region)
+    t=today_str(); week=(date.today()+timedelta(days=7)).isoformat()
+    if followup=="overdue": common.append(and_(partnerships.c.next_follow_up.is_not(None),partnerships.c.next_follow_up!="",partnerships.c.next_follow_up<t))
+    elif followup=="today": common.append(partnerships.c.next_follow_up==t)
+    elif followup=="week": common.append(and_(partnerships.c.next_follow_up>=t,partnerships.c.next_follow_up<=week))
+    elif followup=="none": common.append(or_(partnerships.c.next_follow_up.is_(None),partnerships.c.next_follow_up==""))
+    elif followup: common.append(partnerships.c.next_follow_up==followup)
+    facet_rows=rows(select(partnerships.c.region,partnerships.c.owner_id,powner.c.name.label("owner_name"),partnerships.c.temperature,partnerships.c.status,partnerships.c.next_follow_up).select_from(joined).where(partnership_visibility_condition(u)).distinct())
+    distinct=lambda k:{r[k] for r in facet_rows if r[k]}
+    temp_order={"Hot":0,"Warm":1,"Cold":2}
+    facets={"temperatures":sorted(distinct("temperature"),key=lambda v:(temp_order.get(v,9),v)),
+            "statuses":sorted(distinct("status"),key=str.lower),
+            "follow_ups":sorted(distinct("next_follow_up")),
+            "has_empty_follow_up":any(not r["next_follow_up"] for r in facet_rows),
+            "regions":sorted(distinct("region"),key=str.lower),
+            "has_empty_region":any(not r["region"] for r in facet_rows),
+            "owners":sorted([{"id":oid,"name":n} for oid,n in {(r["owner_id"],r["owner_name"]) for r in facet_rows}],key=lambda x:(x["name"] or "").lower())}
+    if common: base=base.where(*common)
+    summary_stmt=select(partnerships.c.temperature,func.count(partnerships.c.id).label("count")).select_from(partnerships.join(partner_companies,partner_companies.c.id==partnerships.c.company_id).join(powner,powner.c.id==partnerships.c.owner_id)).where(partnership_visibility_condition(u),*common).group_by(partnerships.c.temperature)
+    temp_counts={r["temperature"]:r["count"] for r in rows(summary_stmt)}
+    overdue_stmt=select(func.count(partnerships.c.id).label("count")).select_from(partnerships.join(partner_companies,partner_companies.c.id==partnerships.c.company_id).join(powner,powner.c.id==partnerships.c.owner_id)).where(partnership_visibility_condition(u),*common,partnerships.c.next_follow_up.is_not(None),partnerships.c.next_follow_up<today_str(),~partnerships.c.status.in_(["Converted","Disqualified","Lost"]))
+    overdue=(row(overdue_stmt) or {}).get("count",0)
+    if temperature: base=base.where(partnerships.c.temperature==temperature)
+    nrow=row(select(func.count().label("total")).select_from(base.subquery())); n=int((nrow or {}).get("total",0))
+    temp_rank=case((partnerships.c.temperature=="Hot",0),(partnerships.c.temperature=="Warm",1),(partnerships.c.temperature=="Cold",2),else_=3)
+    sort_cols={"company_name":func.lower(partner_companies.c.name),"temperature":temp_rank,"status":func.lower(partnerships.c.status),
+               "owner_name":func.lower(powner.c.name),"next_follow_up":partnerships.c.next_follow_up,"region":func.lower(func.coalesce(partnerships.c.region,""))}
+    order=[]
+    if sort in sort_cols:
+        col=sort_cols[sort]
+        if sort in ("next_follow_up","region"):
+            empty=or_(partnerships.c.next_follow_up.is_(None),partnerships.c.next_follow_up=="") if sort=="next_follow_up" else or_(partnerships.c.region.is_(None),partnerships.c.region=="")
+            order.append(case((empty,1),else_=0))
+        order.append(col.desc() if dir=="desc" else col.asc())
+    order.append(partnerships.c.updated_at.desc())
+    items=rows(base.order_by(*order).offset((page-1)*page_size).limit(page_size))
+    if "LEAD_EDIT" in u["permissions"] and items:
+        scope=set(scope_user_ids(u))
+        shared_edit={r["entity_id"] for r in rows(select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type=="partnership",record_shares.c.user_id==u["id"],record_shares.c.access_level=="edit",record_shares.c.entity_id.in_([i["id"] for i in items]))))}
+        for i in items: i["can_edit"]=i["owner_id"] in scope or i["id"] in shared_edit
+    else:
+        for i in items: i["can_edit"]=False
+    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"facets":facets,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
+
+# ── Partnerships CSV import (same behaviour as the Prospects CSV import) ──────
+PARTNERSHIP_SAMPLE_CSV_HEADER = "Company,Vertical,Region,Country,Contact Name,Designation,Email,Phone,Signal,Source,Status,Next Follow-up,Remarks,Owner Email"
+PARTNERSHIP_SAMPLE_CSV_ROWS = [
+    "Meridian Systems Alliance,Systems Integration,North America,USA,Pat Rivera,VP Alliances,pat@meridian.example,+1-555-0140,Warm,Referral,New,2026-10-20,Exploring a co-sell agreement,bd.exec1@jsan.local",
+    "Northlight Analytics Partners,Data & AI,Europe,UK,Sam Cole,Director Partnerships,sam@northlight.example,+44-20-5678,Hot,Event,Engaged,2026-10-12,Signed NDA; drafting partnership terms,bd.exec2@jsan.local",
+]
+
+@app.get("/api/partnerships/import/sample")
+def download_partnership_sample_csv(u=Depends(require_perm("LEAD_CREATE"))):
+    content = PARTNERSHIP_SAMPLE_CSV_HEADER + "\n" + "\n".join(PARTNERSHIP_SAMPLE_CSV_ROWS) + "\n"
+    return StreamingResponse(iter([content]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=pursuitnova_partnerships_sample.csv"})
+
+@app.post("/api/partnerships/import")
+def import_partnerships_csv(file: UploadFile = File(...), u=Depends(require_csrf)):
+    if "LEAD_CREATE" not in u.get("permissions", []): raise HTTPException(403, "Lead create permission required")
+    try:
+        raw = file.file.read()
+        for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try: text = raw.decode(enc); break
+            except Exception: continue
+        else: raise ValueError("Unable to decode file")
+        reader = csv.DictReader(io.StringIO(text))
+    except Exception as e:
+        raise HTTPException(400, f"Cannot read CSV: {e}")
+
+    fields = [f.strip().lower() for f in (reader.fieldnames or [])]
+    required = {"company"}
+    missing_cols = required - {f.replace(" ", "").replace("_", "") for f in fields}
+    if missing_cols:
+        raise HTTPException(400, f"Missing required column(s): {', '.join(required)}. Found: {', '.join(reader.fieldnames or [])}")
+
+    user_cache = {}; user_names = {}
+    for ur in rows(select(users.c.id, users.c.name, users.c.email)):
+        user_cache[ur["email"].lower()] = ur["id"]
+        user_cache[ur["name"].lower()] = ur["id"]
+        user_names[ur["id"]] = ur["name"]
+    assignable_cache = {}
+
+    results = {"imported": 0, "skipped": 0, "errors": [], "warnings": []}
+
+    for idx, raw_row in enumerate(reader, start=2):
+        row_num = idx
+        r = {k.strip().lower().replace(" ", "_"): (v.strip() if v else "") for k, v in raw_row.items() if k}
+        company_name = r.get("company", "").strip()
+        if not company_name:
+            results["errors"].append({"row": row_num, "message": "Company name is empty — row skipped"})
+            results["skipped"] += 1
+            continue
+
+        owner_key = (r.get("owner_email") or r.get("owner") or "").strip().lower()
+        owner_id = user_cache.get(owner_key, u["id"])
+        if owner_key and owner_key not in user_cache:
+            results["warnings"].append({"row": row_num, "message": f"Owner '{r.get('owner_email') or r.get('owner')}' not found — assigned to you"})
+        elif owner_id != u["id"]:
+            if owner_id not in assignable_cache: assignable_cache[owner_id] = can_assign(u, owner_id)
+            if not assignable_cache[owner_id]:
+                results["warnings"].append({"row": row_num, "message": f"You cannot assign partnerships to {user_names.get(owner_id, 'that user')} — assigned to you"})
+                owner_id = u["id"]
+
+        raw_status = (r.get("status") or "New").strip()
+        status = STATUS_MAP.get(raw_status.lower(), raw_status)
+        if status not in VALID_STATUSES:
+            results["warnings"].append({"row": row_num, "message": f"Unknown status '{raw_status}' — defaulted to 'New'"})
+            status = "New"
+
+        signal = (r.get("signal") or r.get("temperature") or "Warm").strip().title()
+        if signal not in VALID_SIGNALS:
+            results["warnings"].append({"row": row_num, "message": f"Unknown signal '{signal}' — defaulted to 'Warm'"})
+            signal = "Warm"
+
+        norm = normalize_name(company_name)
+        existing_company = row(select(partner_companies.c.id, partner_companies.c.name).where(partner_companies.c.normalized_name == norm)) if norm else None
+
+        try:
+            if existing_company:
+                company_id = existing_company["id"]
+                results["warnings"].append({"row": row_num, "message": f"Company '{company_name}' already exists — linked to existing"})
+            else:
+                company_id = execute(insert(partner_companies).values(
+                    name=company_name, normalized_name=norm,
+                    vertical=r.get("vertical") or "Other",
+                    website=r.get("website") or None, domain=domain_from_url(r.get("website")),
+                    region=r.get("region") or None, country=r.get("country") or None,
+                    state=r.get("state") or None, city=r.get("city") or None,
+                    status="Active", created_by=u["id"]
+                ))
+
+            existing_partnership = row(select(partnerships.c.id).where(partnerships.c.company_id == company_id))
+            if existing_partnership:
+                results["warnings"].append({"row": row_num, "message": f"Partnership for '{company_name}' already exists — skipped"})
+                results["skipped"] += 1
+                continue
+
+            next_fu = None
+            raw_fu = r.get("next_follow-up") or r.get("next_follow_up") or r.get("next_action_date") or ""
+            if raw_fu:
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+                    try: next_fu = datetime.strptime(raw_fu, fmt).strftime("%Y-%m-%d"); break
+                    except Exception: pass
+
+            source = r.get("source") or "Other"
+            remarks = r.get("remarks") or r.get("received_summary") or r.get("next_action") or ""
+
+            partnership_id = execute(insert(partnerships).values(
+                company_id=company_id, owner_id=owner_id,
+                temperature=signal, source=source, status=status,
+                region=r.get("region") or None, country=r.get("country") or None,
+                next_follow_up=next_fu, remarks=remarks, created_by=u["id"]
+            ))
+
+            contact_name = r.get("contact_name") or r.get("contact") or ""
+            if contact_name:
+                emails = [e.strip() for e in (r.get("email") or "").split(";") if e.strip() and "@" in e]
+                primary_email = emails[0] if emails else None
+                ne = normalize_email(primary_email)
+                execute(insert(partner_contacts).values(
+                    company_id=company_id, name=contact_name,
+                    designation=r.get("designation") or None,
+                    email=primary_email, normalized_email=ne,
+                    phone=r.get("phone") or None,
+                    is_primary=True, active=True, created_by=u["id"]
+                ))
+                for extra_email in emails[1:]:
+                    ene = normalize_email(extra_email)
+                    if ene and not row(select(partner_contacts.c.id).where(and_(partner_contacts.c.company_id == company_id, partner_contacts.c.normalized_email == ene))):
+                        execute(insert(partner_contacts).values(
+                            company_id=company_id, name=extra_email.split("@")[0],
+                            email=extra_email, normalized_email=ene,
+                            is_primary=False, active=True, created_by=u["id"]
+                        ))
+
+            action_desc = r.get("next_action") or r.get("sent_subject") or None
+            if action_desc and partnership_id:
+                execute(insert(partner_actions).values(
+                    partnership_id=partnership_id, action_date=today_str(),
+                    description=action_desc, assigned_to=owner_id,
+                    due_date=next_fu or (date.today() + timedelta(days=7)).isoformat(),
+                    status="Open", priority="Medium", created_by=u["id"]
+                ))
+
+            audit(u["id"], "partnership", partnership_id, "IMPORT", {"company": company_name, "source": "csv"})
             results["imported"] += 1
 
         except IntegrityError as e:

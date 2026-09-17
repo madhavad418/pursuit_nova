@@ -460,6 +460,182 @@ kpi_actuals = Table(
     UniqueConstraint("user_id", "template_id", "month", name="uq_kpi_actual_user_tpl_month"),
 )
 
+# ── Partnerships: a second, fully independent pipeline (channel / technology / strategic partners) ──
+# Mirrors companies/contacts/leads/meetings/moms/actions/opportunities/followups/opportunity_team/mom_attachments
+# exactly, in its own tables, so nothing here can ever change what the Prospects tab or its reports show.
+partner_companies = Table(
+    "partner_companies", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(220), nullable=False),
+    Column("normalized_name", String(220), nullable=False),
+    Column("vertical", Text, nullable=False),
+    Column("website", String(500)),
+    Column("domain", String(255)),
+    Column("linkedin_url", String(500)),
+    Column("external_url", String(500)),
+    Column("region", String(80)),
+    Column("country", String(100)),
+    Column("state", String(100)),
+    Column("city", String(100)),
+    Column("remarks", Text),
+    Column("status", String(40), nullable=False, default="Active"),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_contacts = Table(
+    "partner_contacts", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", ForeignKey("partner_companies.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(180), nullable=False),
+    Column("designation", String(180)),
+    Column("department", String(120)),
+    Column("email", String(190)),
+    Column("normalized_email", String(190)),
+    Column("phone", String(80)),
+    Column("linkedin_url", String(500)),
+    Column("location", String(220)),
+    Column("remarks", Text),
+    Column("is_primary", Boolean, nullable=False, default=False),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partnerships = Table(
+    "partnerships", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", ForeignKey("partner_companies.id", ondelete="RESTRICT"), nullable=False),
+    Column("owner_id", ForeignKey("users.id"), nullable=False),
+    Column("temperature", String(20), nullable=False, default="Warm"),
+    Column("source", String(80), nullable=False, default="LinkedIn"),
+    Column("source_detail", String(255)),
+    Column("status", String(60), nullable=False, default="New"),
+    Column("region", String(80)),
+    Column("country", String(100)),
+    Column("state", String(100)),
+    Column("city", String(100)),
+    Column("next_follow_up", String(10)),
+    Column("remarks", Text),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_opportunities = Table(
+    "partner_opportunities", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("partnership_id", ForeignKey("partnerships.id", ondelete="CASCADE"), nullable=False),
+    Column("company_id", ForeignKey("partner_companies.id", ondelete="RESTRICT"), nullable=False),
+    Column("owner_id", ForeignKey("users.id"), nullable=False),
+    Column("presales_owner_id", ForeignKey("users.id")),
+    Column("name", String(240), nullable=False),
+    Column("service_practice", String(140)),
+    Column("status", String(80), nullable=False, default="New Opportunity"),
+    Column("forecast_category", String(20), nullable=False, default="Pipeline"),
+    Column("amount", Float, nullable=False, default=0),
+    Column("currency", String(10), nullable=False, default="USD"),
+    Column("probability", Float, nullable=False, default=10),
+    Column("weighted_value", Float, nullable=False, default=0),
+    Column("expected_close_date", String(10)),
+    Column("proposal_date", String(10)),
+    Column("last_follow_up_date", String(10)),
+    Column("next_follow_up_date", String(10)),
+    Column("follow_up_count", Integer, nullable=False, default=0),
+    Column("final_amount", Float),
+    Column("lost_reason", String(255)),
+    Column("hold_reason", String(255)),
+    Column("hold_review_date", String(10)),
+    Column("competitor", String(180)),
+    Column("remarks", Text),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+    Column("closed_at", String(10)),
+)
+partner_meetings = Table(
+    "partner_meetings", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("partnership_id", ForeignKey("partnerships.id", ondelete="CASCADE"), nullable=False),
+    Column("opportunity_id", ForeignKey("partner_opportunities.id", ondelete="SET NULL")),
+    Column("meeting_date", String(10), nullable=False),
+    Column("meeting_time", String(10)),
+    Column("meeting_type", String(80), nullable=False),
+    Column("status", String(40), nullable=False, default="Scheduled"),
+    Column("purpose", Text),
+    Column("customer_participants", Text),
+    Column("jsan_participants", Text),
+    Column("remarks", Text),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_moms = Table(
+    "partner_moms", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("meeting_id", ForeignKey("partner_meetings.id", ondelete="SET NULL")),
+    Column("partnership_id", ForeignKey("partnerships.id", ondelete="CASCADE"), nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("customer_requirements", Text),
+    Column("jsan_commitments", Text),
+    Column("customer_commitments", Text),
+    Column("risks", Text),
+    Column("next_steps", Text),
+    Column("follow_up_date", String(10)),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_mom_attachments = Table(
+    "partner_mom_attachments", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("mom_id", ForeignKey("partner_moms.id", ondelete="CASCADE"), nullable=False),
+    Column("partnership_id", ForeignKey("partnerships.id", ondelete="CASCADE"), nullable=False),
+    Column("filename", String(255), nullable=False),
+    Column("content_type", String(120), nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("data", LargeBinary, nullable=False),
+    Column("uploaded_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_actions = Table(
+    "partner_actions", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("partnership_id", ForeignKey("partnerships.id", ondelete="CASCADE"), nullable=False),
+    Column("opportunity_id", ForeignKey("partner_opportunities.id", ondelete="SET NULL")),
+    Column("action_date", String(10), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("assigned_to", ForeignKey("users.id"), nullable=False),
+    Column("due_date", String(10), nullable=False),
+    Column("status", String(40), nullable=False, default="Open"),
+    Column("priority", String(20), nullable=False, default="Medium"),
+    Column("remarks", Text),
+    Column("completion_date", String(10)),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_followups = Table(
+    "partner_followups", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("opportunity_id", ForeignKey("partner_opportunities.id", ondelete="CASCADE"), nullable=False),
+    Column("follow_up_date", String(10), nullable=False),
+    Column("owner_id", ForeignKey("users.id"), nullable=False),
+    Column("response", Text),
+    Column("next_follow_up_date", String(10)),
+    Column("remarks", Text),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+partner_opportunity_team = Table(
+    "partner_opportunity_team", metadata,
+    Column("opportunity_id", ForeignKey("partner_opportunities.id", ondelete="CASCADE"), primary_key=True),
+    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("team_role", String(80), nullable=False, default="Contributor"),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
@@ -471,6 +647,14 @@ Index("ix_companies_domain", companies.c.domain)
 Index("ix_contacts_email", contacts.c.normalized_email)
 Index("ix_saved_views_user_module", saved_views.c.user_id, saved_views.c.module)
 Index("ix_fx_currency", fx_rates.c.currency)
+Index("ix_partnerships_owner", partnerships.c.owner_id)
+Index("ix_partnerships_company", partnerships.c.company_id)
+Index("ix_partner_actions_assignee_due", partner_actions.c.assigned_to, partner_actions.c.due_date)
+Index("ix_partner_mom_attachments_mom", partner_mom_attachments.c.mom_id)
+Index("ix_partner_opps_owner_status", partner_opportunities.c.owner_id, partner_opportunities.c.status)
+Index("ix_partner_companies_norm", partner_companies.c.normalized_name)
+Index("ix_partner_companies_domain", partner_companies.c.domain)
+Index("ix_partner_contacts_email", partner_contacts.c.normalized_email)
 
 PH = PasswordHasher()
 
@@ -559,7 +743,9 @@ def _bootstrap_initial_admin():
 def _add_missing_columns():
     """create_all() never alters existing tables, so add columns introduced after a database was first created."""
     # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
-    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments):
+    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
+                partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
+                partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:

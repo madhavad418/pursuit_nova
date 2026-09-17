@@ -7,11 +7,11 @@ import { navigate } from '../lib/router'
 import { Button, Modal, Empty, Spinner, Field, Input } from './UI'
 
 const nav=[
-  ['dashboard','Dashboard','dashboard'],['prospects','Prospects','prospects','LEAD_VIEW'],['actions','Actions','actions'],['pipeline','Opportunity Pipeline','pipeline','OPPORTUNITY_VIEW'],['forecast','Forecast','forecast','FORECAST_VIEW'],['leadership','Leadership Analytics','leadership','REPORT_VIEW'],['kpi','KPI Tracker','target']
+  ['dashboard','Dashboard','dashboard'],['prospects','Prospects','prospects','LEAD_VIEW'],['partnerships','Partnerships','partner','LEAD_VIEW'],['actions','Actions','actions'],['pipeline','Opportunity Pipeline','pipeline','OPPORTUNITY_VIEW'],['forecast','Forecast','forecast','FORECAST_VIEW'],['leadership','Leadership Analytics','leadership','REPORT_VIEW'],['kpi','KPI Tracker','target']
 ]
 export default function AppShell({route,children}){
  const {user,logout,has}=useAuth(); const [collapsed,setCollapsed]=useState(false); const [notifOpen,setNotifOpen]=useState(false); const [notifications,setNotifications]=useState([]); const [searchOpen,setSearchOpen]=useState(false); const [search,setSearch]=useState(''); const [results,setResults]=useState(null); const [pwOpen,setPwOpen]=useState(false); const [pw,setPw]=useState({current:'',next:'',confirm:''}); const [pwError,setPwError]=useState(''); const [pwDone,setPwDone]=useState(false)
- const current=useMemo(()=>nav.find(([key])=>route.path.startsWith('/'+key))?.[0] || (route.path.startsWith('/lead/')?'prospects':'dashboard'),[route.path])
+ const current=useMemo(()=>nav.find(([key])=>route.path.startsWith('/'+key))?.[0] || (route.path.startsWith('/lead/')?'prospects':route.path.startsWith('/partnership/')?'partnerships':'dashboard'),[route.path])
  const loadNotif=()=>api.get('/api/notifications').then(setNotifications).catch(()=>{})
  useEffect(()=>{loadNotif()},[route.path])
  useEffect(()=>{if(!searchOpen){setSearch('');setResults(null)}},[searchOpen])

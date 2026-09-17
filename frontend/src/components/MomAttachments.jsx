@@ -8,7 +8,7 @@ const MAX_FILES=10
 const DOCX_ACCEPT='.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 export const formatBytes=n=>n<1024?`${n} B`:n<1024*1024?`${(n/1024).toFixed(0)} KB`:`${(n/1024/1024).toFixed(1)} MB`
-const fileUrl=(momId,attId)=>`${api.base}/api/moms/${momId}/attachments/${attId}`
+const fileUrl=(momId,attId,base='/api/moms')=>`${api.base}${base}/${momId}/attachments/${attId}`
 
 // Quick checks before upload; the server repeats all of them and also inspects the file contents.
 export function checkDocxFiles(files,existingCount=0){
@@ -25,11 +25,11 @@ export function checkDocxFiles(files,existingCount=0){
 }
 
 // Uploads one by one so a single bad file does not block the rest.
-export async function uploadMomFiles(momId,files){
+export async function uploadMomFiles(momId,files,base='/api/moms'){
  const uploaded=[],failed=[]
  for(const f of files){
   const form=new FormData();form.append('file',f)
-  try{uploaded.push(await api.raw(`/api/moms/${momId}/attachments`,{method:'POST',body:form}))}
+  try{uploaded.push(await api.raw(`${base}/${momId}/attachments`,{method:'POST',body:form}))}
   catch(e){failed.push(`${f.name}: ${e.message}`)}
  }
  return {uploaded,failed}
@@ -47,21 +47,21 @@ export function DocxPicker({files,onChange,onError}){
  </div>
 }
 
-async function fetchDocx(momId,attId){
- const r=await fetch(fileUrl(momId,attId),{credentials:'include'})
+async function fetchDocx(momId,attId,base='/api/moms'){
+ const r=await fetch(fileUrl(momId,attId,base),{credentials:'include'})
  if(!r.ok){let msg=`Could not open the file (${r.status})`;try{msg=(await r.json()).detail||msg}catch{};throw new Error(msg)}
  return r.blob()
 }
 
-export async function downloadAttachment(momId,att){
- const blob=await fetchDocx(momId,att.id)
+export async function downloadAttachment(momId,att,base='/api/moms'){
+ const blob=await fetchDocx(momId,att.id,base)
  const url=URL.createObjectURL(blob)
  const a=document.createElement('a');a.href=url;a.download=att.filename;document.body.appendChild(a);a.click();a.remove()
  setTimeout(()=>URL.revokeObjectURL(url),10000)
 }
 
 // Renders the Word document in the page. Embedded HTML chunks are not rendered and links are limited to safe schemes.
-export function DocxViewer({momId,attachment,onClose,onToast}){
+export function DocxViewer({momId,attachment,onClose,onToast,base='/api/moms'}){
  const bodyRef=useRef(null); const styleRef=useRef(null)
  const [state,setState]=useState('loading'); const [error,setError]=useState('')
  useEffect(()=>{
@@ -69,7 +69,7 @@ export function DocxViewer({momId,attachment,onClose,onToast}){
   let cancelled=false; setState('loading'); setError('')
   ;(async()=>{
    try{
-    const [blob,{renderAsync}]=await Promise.all([fetchDocx(momId,attachment.id),import('docx-preview')])
+    const [blob,{renderAsync}]=await Promise.all([fetchDocx(momId,attachment.id,base),import('docx-preview')])
     if(cancelled||!bodyRef.current)return
     bodyRef.current.innerHTML=''; styleRef.current.innerHTML=''
     await renderAsync(blob,bodyRef.current,styleRef.current,{className:'docx',inWrapper:true,ignoreWidth:false,breakPages:true,ignoreFonts:true,useBase64URL:true,renderAltChunks:false,renderComments:false,renderChanges:false,experimental:false})
@@ -84,7 +84,7 @@ export function DocxViewer({momId,attachment,onClose,onToast}){
   })()
   return()=>{cancelled=true}
  },[momId,attachment?.id])
- const download=async()=>{try{await downloadAttachment(momId,attachment)}catch(e){onToast?.({type:'error',message:e.message})}}
+ const download=async()=>{try{await downloadAttachment(momId,attachment,base)}catch(e){onToast?.({type:'error',message:e.message})}}
  return <Modal open={!!attachment} onClose={onClose} title={attachment?.filename} eyebrow="Minutes of Meeting document" size="xl">
   <div className="docx-viewer-bar"><span>{attachment&&formatBytes(attachment.size_bytes)}{attachment?.uploaded_by_name?` · uploaded by ${attachment.uploaded_by_name}`:''}</span><Button variant="soft" icon="download" onClick={download}>Download</Button></div>
   {state==='loading'&&<Spinner label="Opening document"/>}
@@ -94,21 +94,21 @@ export function DocxViewer({momId,attachment,onClose,onToast}){
  </Modal>
 }
 
-export function MomAttachmentList({mom,canEdit,onChanged,onToast}){
+export function MomAttachmentList({mom,canEdit,onChanged,onToast,base='/api/moms'}){
  const attachments=mom.attachments||[]
  const [viewing,setViewing]=useState(null); const [adding,setAdding]=useState(false); const [files,setFiles]=useState([]); const [busy,setBusy]=useState(false)
  const fail=message=>onToast?.({type:'error',message})
  const upload=async()=>{
   const {ok,errors}=checkDocxFiles(files,attachments.length); if(errors.length)fail(errors.join('\n')); if(!ok.length)return
   setBusy(true)
-  const {uploaded,failed}=await uploadMomFiles(mom.id,ok)
+  const {uploaded,failed}=await uploadMomFiles(mom.id,ok,base)
   setBusy(false)
   if(uploaded.length)onToast?.({message:`${uploaded.length} file${uploaded.length>1?'s':''} attached`})
   if(failed.length)fail(failed.join('\n'))
   setFiles([]); setAdding(false); onChanged?.()
  }
- const remove=async att=>{if(!confirm(`Remove "${att.filename}" from this MoM?`))return;try{await api.delete(`/api/moms/${mom.id}/attachments/${att.id}`);onToast?.({message:'File removed'});onChanged?.()}catch(e){fail(e.message)}}
- const download=async att=>{try{await downloadAttachment(mom.id,att)}catch(e){fail(e.message)}}
+ const remove=async att=>{if(!confirm(`Remove "${att.filename}" from this MoM?`))return;try{await api.delete(`${base}/${mom.id}/attachments/${att.id}`);onToast?.({message:'File removed'});onChanged?.()}catch(e){fail(e.message)}}
+ const download=async att=>{try{await downloadAttachment(mom.id,att,base)}catch(e){fail(e.message)}}
  return <div className="mom-attachments">
   <div className="mom-attachments-head"><b>Documents</b>{canEdit&&!adding&&attachments.length<MAX_FILES&&<Button variant="text" icon="plus" onClick={()=>setAdding(true)}>Attach .docx</Button>}</div>
   {attachments.length>0?<ul className="docx-files">{attachments.map(att=><li key={att.id}>
@@ -122,6 +122,6 @@ export function MomAttachmentList({mom,canEdit,onChanged,onToast}){
    </div>
   </li>)}</ul>:!adding&&<p className="mom-attachments-empty">No documents attached.</p>}
   {adding&&<div className="mom-attach-form"><DocxPicker files={files} onChange={setFiles} onError={fail}/><div className="modal-actions"><Button variant="ghost" onClick={()=>{setAdding(false);setFiles([])}}>Cancel</Button><Button onClick={upload} disabled={!files.length||busy}>{busy?'Uploading…':'Upload'}</Button></div></div>}
-  <DocxViewer momId={mom.id} attachment={viewing} onClose={()=>setViewing(null)} onToast={onToast}/>
+  <DocxViewer momId={mom.id} attachment={viewing} onClose={()=>setViewing(null)} onToast={onToast} base={base}/>
  </div>
 }
