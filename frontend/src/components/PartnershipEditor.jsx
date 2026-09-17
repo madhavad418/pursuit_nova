@@ -1,6 +1,6 @@
 import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
-import { Button,Combobox,Field,Input,Modal,Select,Spinner,Textarea } from './UI'
+import { Button,Field,Input,Modal,Select,Spinner,TagsInput,Textarea } from './UI'
 import { LEAD_STATUSES,LEAD_SOURCES,REGIONS,VERTICALS } from './ProspectEditor'
 
 // Mirrors ProspectEditor.jsx exactly (same columns, same save logic, same role rules) — only the
@@ -77,7 +77,7 @@ export function PartnershipEditor({partnershipId,open,onClose,onSaved,onToast}){
    {!canSave&&<div className="warning-callout"><span>You can view this partnership but not change it.</span></div>}
    <div className="form-section"><h3>Company</h3><div className="form-grid">
     <Field label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>
-    <Field label="Vertical" required hint="Pick one, or type a new vertical"><Combobox disabled={locked('vertical')} required options={VERTICALS} value={form.vertical} onChange={e=>set('vertical',e.target.value)} placeholder="e.g. Systems Integration"/></Field>
+    <Field label="Vertical" required hint="Add as many as apply — pick from the list or type new ones"><TagsInput disabled={locked('vertical')} required options={VERTICALS} value={form.vertical} onChange={v=>set('vertical',v)} placeholder="e.g. Systems Integration"/></Field>
     <Field label="Website">{input('website',{placeholder:'https://'})}</Field>
     <Field label="LinkedIn company">{input('linkedin_url',{placeholder:'https://linkedin.com/company/...'})}</Field>
     <Field label="Region">{select('region',<><option value="">Select region</option>{withCurrent(REGIONS,form.region).map(x=><option key={x}>{x}</option>)}</>)}</Field>

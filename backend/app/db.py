@@ -672,6 +672,59 @@ def normalize_name(value: str | None) -> str:
     value = re.sub(r"\b(pvt\.?\s*ltd\.?|private limited|limited|ltd\.?|inc\.?|llc|corp\.?|corporation|gmbh|plc)\b", "", value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
+CANONICAL_VERTICALS = ["Telecommunications","GIS / Geospatial","Data & AI","Automotive & Mobility","IT Services","Managed Services","Healthcare","Retail","Government","Utilities","Other"]
+
+# Keyword hints for auto-classifying a free-typed vertical into one of the canonical categories
+# above. Matching is a simple substring check on the lowercased input — good enough to catch
+# obvious synonyms without a real NLP model. Order matters: first matching category wins.
+_VERTICAL_KEYWORDS = [
+    ("Telecommunications", ["telecom","telco","5g","4g","broadband","wireless carrier","mobile network"]),
+    ("GIS / Geospatial", ["gis","geospatial","geo-spatial","cartograph","satellite imagery","remote sensing","lidar","orthophoto","photogrammetry","3d map","3d modeling","3d model","3d reconstruction","globe visualization","surveying"]),
+    ("Data & AI", ["artificial intelligence","machine learning","data science","big data","analytics","data & ai","data and ai"," ai "]),
+    ("Automotive & Mobility", ["automotive","vehicle","mobility","electric vehicle"," ev ","fleet management"]),
+    ("Managed Services", ["managed services","msp","outsourc"]),
+    ("IT Services", ["it services","information technology","software services","it consult","system integrat"]),
+    ("Healthcare", ["health","hospital","medical","pharma","clinic"]),
+    ("Retail", ["retail","ecommerce","e-commerce","consumer goods"]),
+    ("Government", ["government","public sector","municipal","federal agency","defence","defense"]),
+    ("Utilities", ["utilit","power grid","electricity supply","water supply","energy distribution"]),
+]
+
+def _classify_one(text: str) -> str:
+    """Map a single free-typed vertical tag to a canonical category when it clearly matches
+    one. Exact (case-insensitive) matches to a canonical name pass through unchanged.
+    Otherwise, keyword hints try to catch obvious synonyms (e.g. "3D Modeling" ->
+    "GIS / Geospatial"). When nothing matches confidently, the original text is kept
+    as-is rather than forced into a bucket it doesn't belong in."""
+    low = f" {text.lower()} "
+    for canon in CANONICAL_VERTICALS:
+        if text.lower() == canon.lower(): return canon
+    for canon, keywords in _VERTICAL_KEYWORDS:
+        for kw in keywords:
+            if kw in low: return canon
+    return text
+
+def split_verticals(value: str | None) -> list[str]:
+    """The vertical field holds one or more comma-separated tags — there is no cap on how
+    many a record can carry. Splits and trims them into a clean list, dropping empties."""
+    if not value: return []
+    return [t.strip() for t in value.split(",") if t.strip()]
+
+def classify_vertical(value: str | None) -> str | None:
+    """Classify every tag in a (possibly multi-tag, comma-separated) vertical value
+    independently, dedupe case-insensitively while preserving first-seen order, and
+    rejoin. A single-tag value behaves exactly as classifying that one tag."""
+    if not value: return value
+    tags = split_verticals(value)
+    if not tags: return value
+    seen = set(); out = []
+    for t in tags:
+        c = _classify_one(t)
+        key = c.lower()
+        if key not in seen:
+            seen.add(key); out.append(c)
+    return ", ".join(out)
+
 def normalize_email(value: str | None) -> str | None:
     v = (value or "").strip().lower()
     return v or None

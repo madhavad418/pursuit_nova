@@ -34,6 +34,33 @@ export function Combobox({ options = [], listId, ...props }) {
     <datalist id={dlId}>{options.map(x => <option key={x} value={x}/>)}</datalist>
   </>
 }
+// A multi-value tag picker backed by a single comma-separated string. Pick as many values from
+// `options` as needed, or type new ones — there is no cap on how many tags can be added. Enter,
+// comma or blur commits the current text as a tag; Backspace on an empty field removes the last one.
+export function TagsInput({ options = [], value = '', onChange, disabled, required, placeholder, listId }) {
+  const id = useId(); const dlId = listId || `tags-${id}`
+  const tags = String(value ?? '').split(',').map(t => t.trim()).filter(Boolean)
+  const [text, setText] = React.useState('')
+  const commit = raw => {
+    const t = raw.trim()
+    if (!t) { setText(''); return }
+    if (!tags.some(x => x.toLowerCase() === t.toLowerCase())) onChange?.([...tags, t].join(', '))
+    setText('')
+  }
+  const removeTag = t => onChange?.(tags.filter(x => x !== t).join(', '))
+  const onKeyDown = e => {
+    if (disabled) return
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(text) }
+    else if (e.key === 'Backspace' && !text && tags.length) removeTag(tags[tags.length - 1])
+  }
+  return <div className={classNames('tags-input', disabled && 'disabled')}>
+    {tags.map(t => <span className="tag-chip" key={t}>{t}{!disabled && <button type="button" onClick={() => removeTag(t)} aria-label={`Remove ${t}`}>×</button>}</span>)}
+    {!disabled && <input className="tags-input-field" list={dlId} autoComplete="off" disabled={disabled}
+      value={text} onChange={e => setText(e.target.value)} onKeyDown={onKeyDown} onBlur={() => commit(text)}
+      placeholder={tags.length ? '' : placeholder} required={required && !tags.length}/>}
+    <datalist id={dlId}>{options.filter(o => !tags.includes(o)).map(o => <option key={o} value={o}/>)}</datalist>
+  </div>
+}
 export function Textarea(props) { return <textarea className="input textarea" rows="3" {...props}/> }
 export function Pagination({ page, pages, onPage }) {
   if (!pages || pages <= 1) return null

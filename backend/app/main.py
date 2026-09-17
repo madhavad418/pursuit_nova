@@ -38,7 +38,7 @@ except Exception:
     trace=Resource=TracerProvider=BatchSpanProcessor=OTLPSpanExporter=None
 
 from app.db import (
-    engine, init_db, hash_password, verify_password, normalize_name, normalize_email, domain_from_url,
+    engine, init_db, hash_password, verify_password, normalize_name, normalize_email, domain_from_url, classify_vertical, split_verticals,
     rows, row, execute,
     roles, permissions, role_permissions, users, companies, contacts, leads, meetings, moms, actions,
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
@@ -711,7 +711,7 @@ def create_company(p:Payload,u=Depends(require_csrf)):
     if not d.get("name") or not d.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
     dups=duplicate_companies(d["name"],d.get("website"))
     if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Reuse the existing company or review duplicates.")
-    cid=execute(insert(companies).values(name=d["name"].strip(),normalized_name=normalize_name(d["name"]),vertical=d["vertical"],website=d.get("website"),domain=domain_from_url(d.get("website")),linkedin_url=d.get("linkedin_url"),external_url=d.get("external_url"),region=d.get("region"),country=d.get("country"),state=d.get("state"),city=d.get("city"),remarks=d.get("remarks"),status="Active",created_by=u["id"]))
+    cid=execute(insert(companies).values(name=d["name"].strip(),normalized_name=normalize_name(d["name"]),vertical=classify_vertical(d["vertical"]),website=d.get("website"),domain=domain_from_url(d.get("website")),linkedin_url=d.get("linkedin_url"),external_url=d.get("external_url"),region=d.get("region"),country=d.get("country"),state=d.get("state"),city=d.get("city"),remarks=d.get("remarks"),status="Active",created_by=u["id"]))
     audit(u["id"],"company",cid,"CREATE",d); return row(select(companies).where(companies.c.id==cid))
 
 @app.get("/api/companies/{company_id}")
@@ -731,6 +731,7 @@ def update_company(company_id:int,p:Payload,u=Depends(require_csrf)):
         if k in vals:
             vals[k]=_clean_text(vals[k],220 if k=="name" else None)
             if not vals[k]: raise HTTPException(400,f"Company {k} is required")
+    if "vertical" in vals: vals["vertical"]=classify_vertical(vals["vertical"])
     for k,label,n in (("region","Region",80),("country","Country",100),("state","State",100),("city","City",100),("remarks","Company notes",None)):
         if k in vals: vals[k]=_clean_text(vals[k],n)
     for k,label in (("website","Website"),("linkedin_url","Company LinkedIn page"),("external_url","Other link")):
@@ -803,7 +804,7 @@ def create_lead_full(p:Payload,u=Depends(require_csrf)):
         if not comp.get("name") or not comp.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
         dups=duplicate_companies(comp["name"],comp.get("website"))
         if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Select the existing company.")
-        company_id=execute(insert(companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=comp["vertical"],website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
+        company_id=execute(insert(companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=classify_vertical(comp["vertical"]),website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
     lead_id=execute(insert(leads).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
     for idx,ct in enumerate(d.get("contacts") or []):
         if ct.get("name"):
@@ -1452,18 +1453,21 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
     op=[x for x in os_ if start.isoformat()<=str(x["created_at"])[:10]<end.isoformat()]
     closed=[x for x in os_ if x.get("closed_at") and start.isoformat()<=x["closed_at"]<end.isoformat()]
     won=[x for x in closed if x["status"]=="Closed Won"]; lost=[x for x in closed if x["status"]=="Closed Lost"]
+    # A record's vertical can carry multiple comma-separated tags (no cap on how many), so it
+    # is attributed to every tag it carries rather than one bucket keyed by the raw string.
+    def vtags(v): return split_verticals(v) or ["Other"]
     verticals={}; sources={}; owners={}
     for l in lp:
-        verticals.setdefault(l["vertical"],{"vertical":l["vertical"],"leads":0,"pipeline":0,"won":0})["leads"]+=1
+        for v in vtags(l["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["leads"]+=1
         sources.setdefault(l["source"],{"source":l["source"],"leads":0,"opportunities":0,"won":0})["leads"]+=1
     lmap={x["id"]:x for x in ls}
     for o in op:
-        v=o["vertical"] or "Other"; verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["pipeline"]+=cv(o.get("amount"),o.get("currency"))
+        for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["pipeline"]+=cv(o.get("amount"),o.get("currency"))
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["opportunities"]+=1
         owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0}); owners[o["owner_name"]]["opportunities"]+=1; owners[o["owner_name"]]["pipeline"]+=cv(o.get("amount"),o.get("currency"))
     for o in won:
-        value=cv(o.get("final_amount") or o.get("amount"),o.get("currency")); v=o["vertical"] or "Other"
-        verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
+        value=cv(o.get("final_amount") or o.get("amount"),o.get("currency"))
+        for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["won"]+=1
         owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0})["won"]+=value
     # Geographic aggregation for map
@@ -1610,7 +1614,7 @@ def query_companies(q:str="",vertical:str="",region:str="",page:int=1,page_size:
     stmt=select(companies,contact_count.label("contact_count"),lead_count.label("lead_count"),opp_count.label("opportunity_count")).where(companies.c.status!="Merged")
     filters=[]
     if q: filters.append(or_(func.lower(companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(companies.c.website," ")).like(f"%{q.lower()}%"),func.lower(func.coalesce(companies.c.vertical," ")).like(f"%{q.lower()}%")))
-    if vertical: filters.append(companies.c.vertical==vertical)
+    if vertical: filters.append(func.lower(companies.c.vertical).like(f"%{vertical.lower()}%"))
     if region: filters.append(companies.c.region==region)
     if filters: stmt=stmt.where(*filters)
     total_stmt=select(func.count()).select_from(select(companies.c.id).where(companies.c.status!="Merged",*filters).subquery())
@@ -2049,7 +2053,7 @@ def import_leads_csv(file: UploadFile = File(...), u=Depends(require_csrf)):
             else:
                 company_id = execute(insert(companies).values(
                     name=company_name, normalized_name=norm,
-                    vertical=r.get("vertical") or "Other",
+                    vertical=classify_vertical(r.get("vertical")) or "Other",
                     website=r.get("website") or None, domain=domain_from_url(r.get("website")),
                     region=r.get("region") or None, country=r.get("country") or None,
                     state=r.get("state") or None, city=r.get("city") or None,
@@ -2219,7 +2223,7 @@ def create_partner_company(p:Payload,u=Depends(require_csrf)):
     if not d.get("name") or not d.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
     dups=duplicate_partner_companies(d["name"],d.get("website"))
     if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Reuse the existing company or review duplicates.")
-    cid=execute(insert(partner_companies).values(name=d["name"].strip(),normalized_name=normalize_name(d["name"]),vertical=d["vertical"],website=d.get("website"),domain=domain_from_url(d.get("website")),linkedin_url=d.get("linkedin_url"),external_url=d.get("external_url"),region=d.get("region"),country=d.get("country"),state=d.get("state"),city=d.get("city"),remarks=d.get("remarks"),status="Active",created_by=u["id"]))
+    cid=execute(insert(partner_companies).values(name=d["name"].strip(),normalized_name=normalize_name(d["name"]),vertical=classify_vertical(d["vertical"]),website=d.get("website"),domain=domain_from_url(d.get("website")),linkedin_url=d.get("linkedin_url"),external_url=d.get("external_url"),region=d.get("region"),country=d.get("country"),state=d.get("state"),city=d.get("city"),remarks=d.get("remarks"),status="Active",created_by=u["id"]))
     audit(u["id"],"partner_company",cid,"CREATE",d); return row(select(partner_companies).where(partner_companies.c.id==cid))
 
 @app.get("/api/partner-companies/{company_id}")
@@ -2239,6 +2243,7 @@ def update_partner_company(company_id:int,p:Payload,u=Depends(require_csrf)):
         if k in vals:
             vals[k]=_clean_text(vals[k],220 if k=="name" else None)
             if not vals[k]: raise HTTPException(400,f"Company {k} is required")
+    if "vertical" in vals: vals["vertical"]=classify_vertical(vals["vertical"])
     for k,label,n in (("region","Region",80),("country","Country",100),("state","State",100),("city","City",100),("remarks","Company notes",None)):
         if k in vals: vals[k]=_clean_text(vals[k],n)
     for k,label in (("website","Website"),("linkedin_url","Company LinkedIn page"),("external_url","Other link")):
@@ -2299,7 +2304,7 @@ def create_partnership_full(p:Payload,u=Depends(require_csrf)):
         if not comp.get("name") or not comp.get("vertical"): raise HTTPException(400,"Company name and vertical are required")
         dups=duplicate_partner_companies(comp["name"],comp.get("website"))
         if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Select the existing company.")
-        company_id=execute(insert(partner_companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=comp["vertical"],website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
+        company_id=execute(insert(partner_companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=classify_vertical(comp["vertical"]),website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
     partnership_id=execute(insert(partnerships).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
     for idx,ct in enumerate(d.get("contacts") or []):
         if ct.get("name"):
@@ -2556,7 +2561,7 @@ def query_partner_companies(q:str="",vertical:str="",region:str="",page:int=1,pa
     stmt=select(partner_companies,contact_count.label("contact_count"),lead_count.label("lead_count"),opp_count.label("opportunity_count")).where(partner_companies.c.status!="Merged")
     filters=[]
     if q: filters.append(or_(func.lower(partner_companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(partner_companies.c.website," ")).like(f"%{q.lower()}%"),func.lower(func.coalesce(partner_companies.c.vertical," ")).like(f"%{q.lower()}%")))
-    if vertical: filters.append(partner_companies.c.vertical==vertical)
+    if vertical: filters.append(func.lower(partner_companies.c.vertical).like(f"%{vertical.lower()}%"))
     if region: filters.append(partner_companies.c.region==region)
     if filters: stmt=stmt.where(*filters)
     total_stmt=select(func.count()).select_from(select(partner_companies.c.id).where(partner_companies.c.status!="Merged",*filters).subquery())
@@ -2699,7 +2704,7 @@ def import_partnerships_csv(file: UploadFile = File(...), u=Depends(require_csrf
             else:
                 company_id = execute(insert(partner_companies).values(
                     name=company_name, normalized_name=norm,
-                    vertical=r.get("vertical") or "Other",
+                    vertical=classify_vertical(r.get("vertical")) or "Other",
                     website=r.get("website") or None, domain=domain_from_url(r.get("website")),
                     region=r.get("region") or None, country=r.get("country") or None,
                     state=r.get("state") or None, city=r.get("city") or None,
