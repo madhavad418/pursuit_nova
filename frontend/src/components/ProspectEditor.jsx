@@ -6,6 +6,7 @@ export const LEAD_STATUSES=['New','Assigned','Contacted','Engaged','Qualified','
 export const LEAD_SOURCES=['LinkedIn','Referral','Event','Conference','Website','Existing Customer','Partner','Management Reference','Outbound','RFP / Tender','Other']
 
 export const REGIONS=['North America','Europe','APAC','Middle East','Africa','Latin America','Global']
+export const VERTICALS=['Telecommunications','GIS / Geospatial','Data & AI','Automotive & Mobility','IT Services','Managed Services','Healthcare','Retail','Government','Utilities','Other']
 
 const str=v=>v==null?'':String(v)
 
@@ -84,7 +85,7 @@ export function ProspectEditor({leadId,open,onClose,onSaved,onToast}){
    {!canSave&&<div className="warning-callout"><span>You can view this prospect but not change it.</span></div>}
    <div className="form-section"><h3>Company</h3><div className="form-grid">
     <Field label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>
-    <Field label="Vertical" required>{input('vertical',{required:true,placeholder:'e.g. Telecommunications'})}</Field>
+    <Field label="Vertical" required>{select('vertical',<><option value="">Select vertical</option>{withCurrent(VERTICALS,form.vertical).map(x=><option key={x}>{x}</option>)}</>)}</Field>
     <Field label="Website">{input('website',{placeholder:'https://'})}</Field>
     <Field label="LinkedIn company">{input('linkedin_url',{placeholder:'https://linkedin.com/company/...'})}</Field>
     <Field label="Region">{select('region',<><option value="">Select region</option>{withCurrent(REGIONS,form.region).map(x=><option key={x}>{x}</option>)}</>)}</Field>

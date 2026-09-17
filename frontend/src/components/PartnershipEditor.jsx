@@ -1,7 +1,7 @@
 import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
 import { Button,Field,Input,Modal,Select,Spinner,Textarea } from './UI'
-import { LEAD_STATUSES,LEAD_SOURCES,REGIONS } from './ProspectEditor'
+import { LEAD_STATUSES,LEAD_SOURCES,REGIONS,VERTICALS } from './ProspectEditor'
 
 // Mirrors ProspectEditor.jsx exactly (same columns, same save logic, same role rules) — only the
 // API paths differ, because partnerships live in their own tables, never a prospect's.
@@ -77,7 +77,7 @@ export function PartnershipEditor({partnershipId,open,onClose,onSaved,onToast}){
    {!canSave&&<div className="warning-callout"><span>You can view this partnership but not change it.</span></div>}
    <div className="form-section"><h3>Company</h3><div className="form-grid">
     <Field label="Company name" required>{input('name',{required:true,maxLength:220})}</Field>
-    <Field label="Vertical" required>{input('vertical',{required:true,placeholder:'e.g. Systems Integration'})}</Field>
+    <Field label="Vertical" required>{select('vertical',<><option value="">Select vertical</option>{withCurrent(VERTICALS,form.vertical).map(x=><option key={x}>{x}</option>)}</>)}</Field>
     <Field label="Website">{input('website',{placeholder:'https://'})}</Field>
     <Field label="LinkedIn company">{input('linkedin_url',{placeholder:'https://linkedin.com/company/...'})}</Field>
     <Field label="Region">{select('region',<><option value="">Select region</option>{withCurrent(REGIONS,form.region).map(x=><option key={x}>{x}</option>)}</>)}</Field>
