@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useId } from 'react'
 import { Icon } from './Icons'
 import { classNames } from '../lib/format'
 
@@ -26,6 +26,14 @@ export function Modal({ open, onClose, title, eyebrow, children, size = 'md' }) 
 export function Field({ label, hint, children, required, className = '' }) { return <label className={classNames('field', className)}><span>{label}{required&&<em>*</em>}</span>{children}{hint&&<small>{hint}</small>}</label> }
 export function Input(props) { return <input className="input" {...props}/> }
 export function Select({ children, ...props }) { return <select className="input" {...props}>{children}</select> }
+// A text input with dropdown suggestions: pick from `options`, or type a value that isn't on the list.
+export function Combobox({ options = [], listId, ...props }) {
+  const id = useId(); const dlId = listId || `combo-${id}`
+  return <>
+    <input className="input" list={dlId} autoComplete="off" {...props}/>
+    <datalist id={dlId}>{options.map(x => <option key={x} value={x}/>)}</datalist>
+  </>
+}
 export function Textarea(props) { return <textarea className="input textarea" rows="3" {...props}/> }
 export function Pagination({ page, pages, onPage }) {
   if (!pages || pages <= 1) return null
