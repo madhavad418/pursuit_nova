@@ -13,8 +13,12 @@ export function RevenueTrend({ data=[], currency='USD' }) {
 export function ForecastBars({ data=[], currency='USD' }) {
   return <ResponsiveContainer width="100%" height={270}><BarChart data={data} margin={{top:10,right:8,left:0,bottom:0}}><CartesianGrid vertical={false} stroke={grid}/><XAxis dataKey="name" tick={axis} axisLine={false} tickLine={false}/><YAxis tick={axis} axisLine={false} tickLine={false} tickFormatter={v=>money(v,currency)}/><Tooltip contentStyle={tooltipStyle} formatter={v=>money(v,currency,false)}/><Bar dataKey="value" radius={[7,7,0,0]}>{data.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer>
 }
+const truncateLabel = (v, max=16) => {
+  const s = String(v ?? '')
+  return s.length > max ? s.slice(0, max-1).trimEnd()+'…' : s
+}
 export function HorizontalBars({ data=[], dataKey='value', nameKey='name', currency, height=260 }) {
-  return <ResponsiveContainer width="100%" height={height}><BarChart data={data} layout="vertical" margin={{top:0,right:16,left:16,bottom:0}}><CartesianGrid horizontal={false} stroke={grid}/><XAxis type="number" tick={axis} axisLine={false} tickLine={false} tickFormatter={v=>currency?money(v,currency):v}/><YAxis type="category" dataKey={nameKey} width={112} tick={axis} axisLine={false} tickLine={false}/><Tooltip contentStyle={tooltipStyle} formatter={v=>currency?money(v,currency,false):v}/><Bar dataKey={dataKey} fill="#0879b9" radius={[0,6,6,0]}/></BarChart></ResponsiveContainer>
+  return <ResponsiveContainer width="100%" height={height}><BarChart data={data} layout="vertical" margin={{top:0,right:16,left:16,bottom:0}}><CartesianGrid horizontal={false} stroke={grid}/><XAxis type="number" tick={axis} axisLine={false} tickLine={false} tickFormatter={v=>currency?money(v,currency):v}/><YAxis type="category" dataKey={nameKey} width={132} tick={axis} axisLine={false} tickLine={false} tickFormatter={truncateLabel} interval={0}/><Tooltip contentStyle={tooltipStyle} labelFormatter={v=>v} formatter={v=>currency?money(v,currency,false):v}/><Bar dataKey={dataKey} fill="#0879b9" radius={[0,6,6,0]}/></BarChart></ResponsiveContainer>
 }
 export function Donut({ data=[], valueKey='count' }) {
   const total=data.reduce((s,x)=>s+Number(x[valueKey]||0),0)
