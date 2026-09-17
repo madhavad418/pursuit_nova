@@ -1,4 +1,4 @@
-import React, { useEffect, useId } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { Icon } from './Icons'
 import { classNames } from '../lib/format'
 
@@ -37,28 +37,46 @@ export function Combobox({ options = [], listId, ...props }) {
 // A multi-value tag picker backed by a single comma-separated string. Pick as many values from
 // `options` as needed, or type new ones — there is no cap on how many tags can be added. Enter,
 // comma or blur commits the current text as a tag; Backspace on an empty field removes the last one.
-export function TagsInput({ options = [], value = '', onChange, disabled, required, placeholder, listId }) {
-  const id = useId(); const dlId = listId || `tags-${id}`
+// Suggestions render as our own compact dropdown rather than a native <datalist> popup — the
+// browser-native one can't be styled and renders far wider/taller-per-row than the rest of the UI.
+export function TagsInput({ options = [], value = '', onChange, disabled, required, placeholder }) {
   const tags = String(value ?? '').split(',').map(t => t.trim()).filter(Boolean)
-  const [text, setText] = React.useState('')
+  const [text, setText] = useState('')
+  const [open, setOpen] = useState(false)
+  const [hi, setHi] = useState(0)
+  const wrapRef = useRef(null)
+  const suggestions = options.filter(o => !tags.includes(o) && (!text || o.toLowerCase().includes(text.toLowerCase())))
+  useEffect(() => { setHi(0) }, [text, open])
+  useEffect(() => {
+    if (!open) return
+    const close = e => { if (!wrapRef.current?.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
   const commit = raw => {
     const t = raw.trim()
-    if (!t) { setText(''); return }
+    setText(''); setOpen(false)
+    if (!t) return
     if (!tags.some(x => x.toLowerCase() === t.toLowerCase())) onChange?.([...tags, t].join(', '))
-    setText('')
   }
   const removeTag = t => onChange?.(tags.filter(x => x !== t).join(', '))
   const onKeyDown = e => {
     if (disabled) return
-    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(text) }
+    if (e.key === 'ArrowDown' && open && suggestions.length) { e.preventDefault(); setHi(h => Math.min(h + 1, suggestions.length - 1)) }
+    else if (e.key === 'ArrowUp' && open && suggestions.length) { e.preventDefault(); setHi(h => Math.max(h - 1, 0)) }
+    else if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(open && suggestions[hi] ? suggestions[hi] : text) }
+    else if (e.key === 'Escape') setOpen(false)
     else if (e.key === 'Backspace' && !text && tags.length) removeTag(tags[tags.length - 1])
   }
-  return <div className={classNames('tags-input', disabled && 'disabled')}>
+  return <div className={classNames('tags-input', disabled && 'disabled')} ref={wrapRef}>
     {tags.map(t => <span className="tag-chip" key={t}>{t}{!disabled && <button type="button" onClick={() => removeTag(t)} aria-label={`Remove ${t}`}>×</button>}</span>)}
-    {!disabled && <input className="tags-input-field" list={dlId} autoComplete="off" disabled={disabled}
-      value={text} onChange={e => setText(e.target.value)} onKeyDown={onKeyDown} onBlur={() => commit(text)}
+    {!disabled && <input className="tags-input-field" autoComplete="off" disabled={disabled}
+      value={text} onChange={e => { setText(e.target.value); setOpen(true) }} onFocus={() => setOpen(true)}
+      onKeyDown={onKeyDown} onBlur={() => commit(text)}
       placeholder={tags.length ? '' : placeholder} required={required && !tags.length}/>}
-    <datalist id={dlId}>{options.filter(o => !tags.includes(o)).map(o => <option key={o} value={o}/>)}</datalist>
+    {!disabled && open && suggestions.length > 0 && <div className="tags-suggest" onMouseDown={e => e.preventDefault()}>
+      {suggestions.map((o, i) => <button type="button" key={o} className={i === hi ? 'hi' : ''} onClick={() => commit(o)}>{o}</button>)}
+    </div>}
   </div>
 }
 export function Textarea(props) { return <textarea className="input textarea" rows="3" {...props}/> }
