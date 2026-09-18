@@ -636,6 +636,26 @@ partner_opportunity_team = Table(
     Column("created_at", DateTime, server_default=func.current_timestamp()),
 )
 
+# Supplier Network: tracks JSAN's own registration/onboarding progress with telecom majors it wants
+# to become a supplier, subcontractor or delivery partner to — a separate direction from Prospects
+# (customers) and Partnerships (channel allies). Deliberately its own table, untouched by either.
+VENDOR_REGISTRATION_STATUSES = ["Ready to initiate", "Qualification preparation", "Portal qualification", "Procurement outreach", "Scope confirmation", "Clarification required"]
+vendor_targets = Table(
+    "vendor_targets", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_name", String(220), nullable=False),
+    Column("market", String(120)),
+    Column("public_evidence", Text),
+    Column("entry_route", String(220)),
+    Column("suggested_approach", Text),
+    Column("registration_status", String(60), nullable=False, default="Ready to initiate"),
+    Column("notes", Text),
+    Column("owner_id", ForeignKey("users.id")),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
@@ -780,6 +800,10 @@ def init_db(seed_demo: bool | None = None, create_schema: bool = True):
         _seed_kpi_templates()
     except Exception:
         pass  # Table may not exist yet if schema is managed externally
+    try:
+        _seed_vendor_targets()
+    except Exception:
+        pass  # Table may not exist yet if schema is managed externally
 
 def _bootstrap_initial_admin():
     """First start of an empty production database: create one Super Admin from INITIAL_ADMIN_EMAIL / INITIAL_ADMIN_PASSWORD."""
@@ -798,7 +822,8 @@ def _add_missing_columns():
     # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
     for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
                 partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
-                partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team):
+                partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
+                vendor_targets):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
@@ -1138,3 +1163,75 @@ def _seed_kpi_templates():
                         target_rows.append({"template_id": tid, "month": months[i], "target_value": float(v)})
         if target_rows:
             c.execute(insert(kpi_targets), target_rows)
+
+def _seed_vendor_targets():
+    """Seed the known telecom-major supplier/subcontractor registration targets (Supplier Network
+    tab). Public-evidence and suggested-approach text is sourced from a market-scan document
+    supplied by the business team; only fills once, and never touches Prospects/Partnerships data."""
+    with engine.begin() as c:
+        if c.execute(select(func.count()).select_from(vendor_targets)).scalar_one() > 0:
+            return
+        admin_id = c.execute(select(users.c.id).order_by(users.c.id)).scalar()
+        if not admin_id:
+            return
+        rows_ = [
+            ("MasTec Communications Group", "USA",
+             "Explicitly welcomes additional contractors, including professional services contractors. Publishes Contractor@MasTec.com.",
+             "Contractors & suppliers",
+             "Offer an offshore OSP design and documentation team supporting its delivery programmes. One of the clearest starting points.",
+             "Ready to initiate"),
+            ("CityFibre", "UK",
+             "Invites interested companies to submit capabilities through its prospective supplier form.",
+             "Supplier enquiries",
+             "Present FTTH planning, CAD/GIS production, design checking and as-built backlog support.",
+             "Ready to initiate"),
+            ("Zayo", "USA/international",
+             "Offers a direct form for companies interested in becoming vendors.",
+             "Vendor request",
+             "Propose fibre route CAD/GIS, network records and as-built production support.",
+             "Ready to initiate"),
+            ("Brightspeed", "USA",
+             "Its supplier page provides separate routes for field contractors and other suppliers.",
+             "Doing business with Brightspeed",
+             "Use the appropriate non-field route for FTTH design, permitting drawings and records support.",
+             "Ready to initiate"),
+            ("Ventia", "Australia/New Zealand",
+             "Publishes telecommunications opportunities and a general supplier expression-of-interest route.",
+             "Suppliers & subcontractors",
+             "Offer design drafting, GIS updates, redline conversion and construction close-out documentation.",
+             "Ready to initiate"),
+            ("Solutions30", "Europe",
+             "Its mySupplace platform invites subcontractors and lists telecom work categories.",
+             "Partner platform",
+             "Ask the telecom delivery team about engineering production subcontracting; most listed categories concern field delivery.",
+             "Ready to initiate"),
+            ("Open Fiber", "Italy",
+             "Publishes an open supplier qualification process covering defined product/service areas.",
+             "Become a supplier",
+             "Seek qualification for applicable engineering services; highlight Italian drawing standards and language capability if available.",
+             "Qualification preparation"),
+            ("FiberCop", "Italy",
+             "Maintains a Vendors Hub and new Supplier Hub, with supplier and subcontracting guidance.",
+             "Vendors Hub",
+             "Approach procurement for network engineering and documentation categories.",
+             "Portal qualification"),
+            ("Eltel", "Norway/Nordics",
+             "Announced a 2026–2031 Telenor Norway contract on 8 September 2026, estimated above €475 million over the initial term, covering expansion and maintenance.",
+             "Contract announcement",
+             "Timely approach to its Norway delivery/procurement team about mobilisation and documentation capacity. New contract signal; offshore demand unconfirmed.",
+             "Procurement outreach"),
+            ("Circet", "Europe",
+             "Circet Benelux invites subcontractor applications; France has a dedicated supplier/subcontractor page.",
+             "Benelux application / France suppliers",
+             "Contact country engineering teams about remote production support. The published recruitment route is largely field-oriented, so qualify offshore scope directly.",
+             "Scope confirmation"),
+            ("Sogetrel", "France",
+             "Its contact page includes a specific partnership request option.",
+             "Partnership contact",
+             "Pitch a French-language production team for fibre drawings, GIS records and as-built packages.",
+             "Clarification required"),
+        ]
+        c.execute(insert(vendor_targets), [
+            {"company_name": n, "market": m, "public_evidence": e, "entry_route": r, "suggested_approach": a, "registration_status": s, "created_by": admin_id}
+            for n, m, e, r, a, s in rows_
+        ])

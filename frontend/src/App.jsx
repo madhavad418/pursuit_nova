@@ -10,6 +10,7 @@ const ProspectsPage=lazy(()=>import('./pages/ProspectsPage'))
 const Lead360Page=lazy(()=>import('./pages/Lead360Page'))
 const PartnershipsPage=lazy(()=>import('./pages/PartnershipsPage'))
 const Partnership360Page=lazy(()=>import('./pages/Partnership360Page'))
+const SupplierNetworkPage=lazy(()=>import('./pages/SupplierNetworkPage'))
 const ActionsPage=lazy(()=>import('./pages/ActionsPage'))
 const PipelinePage=lazy(()=>import('./pages/PipelinePage'))
 const ForecastPage=lazy(()=>import('./pages/ForecastPage'))
@@ -17,7 +18,7 @@ const LeadershipPage=lazy(()=>import('./pages/LeadershipPage'))
 const AdminPage=lazy(()=>import('./pages/AdminPage'))
 const KPIPage=lazy(()=>import('./pages/KPIPage'))
 // Pages whose data needs a role permission; without it the page explains instead of failing.
-const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
+const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/supplier-network','COMPANY_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
 
 // Keeps a crash in one page from blanking the whole app; remounts (and so resets) on navigation.
 class PageBoundary extends React.Component{
@@ -39,6 +40,7 @@ function Product(){
  else if(route.path.startsWith('/lead/'))page=<Lead360Page id={Number(route.path.split('/')[2])} onToast={setToast}/>
  else if(route.path==='/partnerships')page=<PartnershipsPage route={route} onToast={setToast}/>
  else if(route.path.startsWith('/partnership/'))page=<Partnership360Page id={Number(route.path.split('/')[2])} onToast={setToast}/>
+ else if(route.path==='/supplier-network')page=<SupplierNetworkPage onToast={setToast}/>
  else if(route.path==='/actions')page=<ActionsPage onToast={setToast}/>
  else if(route.path==='/pipeline')page=<PipelinePage route={route} onToast={setToast}/>
  else if(route.path==='/forecast')page=<ForecastPage onToast={setToast}/>

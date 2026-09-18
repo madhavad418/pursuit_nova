@@ -47,6 +47,7 @@ from app.db import (
     kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
     partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
     partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
+    vendor_targets, VENDOR_REGISTRATION_STATUSES,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -2775,6 +2776,53 @@ def import_partnerships_csv(file: UploadFile = File(...), u=Depends(require_csrf
             results["skipped"] += 1
 
     return results
+
+@app.get("/api/vendor-targets")
+def list_vendor_targets(u=Depends(require_perm("COMPANY_VIEW"))):
+    return {"items": rows(select(vendor_targets, users.c.name.label("owner_name")).select_from(vendor_targets.outerjoin(users, users.c.id == vendor_targets.c.owner_id)).order_by(vendor_targets.c.company_name)), "statuses": VENDOR_REGISTRATION_STATUSES}
+
+@app.post("/api/vendor-targets")
+def create_vendor_target(p: Payload, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    d = p.data
+    name = _clean_text(d.get("company_name"), 220)
+    if not name: raise HTTPException(400, "Company name is required")
+    status = d.get("registration_status") or "Ready to initiate"
+    if status not in VENDOR_REGISTRATION_STATUSES: raise HTTPException(400, "Invalid registration status")
+    vid = execute(insert(vendor_targets).values(
+        company_name=name, market=_clean_text(d.get("market"), 120), public_evidence=_clean_text(d.get("public_evidence")),
+        entry_route=_clean_text(d.get("entry_route"), 220), suggested_approach=_clean_text(d.get("suggested_approach")),
+        registration_status=status, notes=_clean_text(d.get("notes")),
+        owner_id=int(d["owner_id"]) if d.get("owner_id") else None, created_by=u["id"]))
+    audit(u["id"], "vendor_target", vid, "CREATE", d)
+    return row(select(vendor_targets).where(vendor_targets.c.id == vid))
+
+@app.put("/api/vendor-targets/{target_id}")
+def update_vendor_target(target_id: int, p: Payload, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    if not row(select(vendor_targets.c.id).where(vendor_targets.c.id == target_id)): raise HTTPException(404, "Target not found")
+    d = p.data
+    vals = {k: d[k] for k in ("company_name", "market", "public_evidence", "entry_route", "suggested_approach", "registration_status", "notes", "owner_id") if k in d}
+    if "company_name" in vals:
+        vals["company_name"] = _clean_text(vals["company_name"], 220)
+        if not vals["company_name"]: raise HTTPException(400, "Company name is required")
+    if "registration_status" in vals and vals["registration_status"] not in VENDOR_REGISTRATION_STATUSES: raise HTTPException(400, "Invalid registration status")
+    for k, n in (("market", 120), ("entry_route", 220), ("public_evidence", None), ("suggested_approach", None), ("notes", None)):
+        if k in vals: vals[k] = _clean_text(vals[k], n)
+    if "owner_id" in vals: vals["owner_id"] = int(vals["owner_id"]) if vals["owner_id"] else None
+    vals["updated_at"] = utcnow()
+    execute(update(vendor_targets).where(vendor_targets.c.id == target_id).values(**vals))
+    audit(u["id"], "vendor_target", target_id, "UPDATE", d)
+    return row(select(vendor_targets).where(vendor_targets.c.id == target_id))
+
+@app.delete("/api/vendor-targets/{target_id}")
+def delete_vendor_target(target_id: int, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    t = row(select(vendor_targets.c.id, vendor_targets.c.company_name).where(vendor_targets.c.id == target_id))
+    if not t: raise HTTPException(404, "Target not found")
+    execute(delete(vendor_targets).where(vendor_targets.c.id == target_id))
+    audit(u["id"], "vendor_target", target_id, "DELETE", {"company_name": t["company_name"]})
+    return {"ok": True}
 
 # Static no-build PWA UI. API routes are registered first, so /api remains authoritative.
 STATIC_DIR=os.getenv("FRONTEND_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__),"..","..","frontend","dist"))
