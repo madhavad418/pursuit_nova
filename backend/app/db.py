@@ -639,7 +639,7 @@ partner_opportunity_team = Table(
 # Supplier Network: tracks JSAN's own registration/onboarding progress with telecom majors it wants
 # to become a supplier, subcontractor or delivery partner to — a separate direction from Prospects
 # (customers) and Partnerships (channel allies). Deliberately its own table, untouched by either.
-VENDOR_REGISTRATION_STATUSES = ["Ready to initiate", "Qualification preparation", "Portal qualification", "Procurement outreach", "Scope confirmation", "Clarification required"]
+VENDOR_REGISTRATION_STATUSES = ["Ready to initiate", "Initiated", "Qualification preparation", "Portal qualification", "Procurement outreach", "Scope confirmation", "Clarification required"]
 vendor_targets = Table(
     "vendor_targets", metadata,
     Column("id", Integer, primary_key=True),

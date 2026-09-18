@@ -8,8 +8,8 @@ import { useAuth } from '../components/Auth'
 // right as JSAN works its way onto that company's supplier/subcontractor roster. "Clarification
 // required" is a blocker state, not a final stage — a company can land there from anywhere while
 // JSAN waits on an answer, then move on once resolved.
-export const REGISTRATION_STATUSES=['Ready to initiate','Qualification preparation','Portal qualification','Procurement outreach','Scope confirmation','Clarification required']
-const STATUS_TONE={'Ready to initiate':'neutral','Qualification preparation':'info','Portal qualification':'info','Procurement outreach':'warning','Scope confirmation':'warning','Clarification required':'danger'}
+export const REGISTRATION_STATUSES=['Ready to initiate','Initiated','Qualification preparation','Portal qualification','Procurement outreach','Scope confirmation','Clarification required']
+const STATUS_TONE={'Ready to initiate':'neutral','Initiated':'neutral','Qualification preparation':'info','Portal qualification':'info','Procurement outreach':'warning','Scope confirmation':'warning','Clarification required':'danger'}
 
 const emptyForm={company_name:'',market:'',registration_status:'Ready to initiate',entry_route:'',public_evidence:'',suggested_approach:'',notes:''}
 
