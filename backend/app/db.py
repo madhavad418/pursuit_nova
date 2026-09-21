@@ -656,6 +656,21 @@ vendor_targets = Table(
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
 )
 
+# Extra people on a prospect ("co-owners") or an action ("co-assignees"), beyond its primary owner_id / assigned_to.
+# Additive: existing rows and columns are untouched; a record with no rows here behaves exactly as before.
+# entity_type is "lead", "action" or "generic_action".
+record_people = Table(
+    "record_people", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("entity_type", String(30), nullable=False),
+    Column("entity_id", Integer, nullable=False),
+    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    UniqueConstraint("entity_type", "entity_id", "user_id", name="uq_record_person"),
+)
+Index("ix_record_people_entity", record_people.c.entity_type, record_people.c.entity_id)
+Index("ix_record_people_user", record_people.c.user_id, record_people.c.entity_type)
 Index("ix_leads_owner", leads.c.owner_id)
 Index("ix_leads_company", leads.c.company_id)
 Index("ix_actions_assignee_due", actions.c.assigned_to, actions.c.due_date)
@@ -823,7 +838,7 @@ def _add_missing_columns():
     for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
                 partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
                 partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
-                vendor_targets):
+                vendor_targets, record_people):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:

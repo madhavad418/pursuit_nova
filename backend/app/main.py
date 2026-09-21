@@ -47,7 +47,7 @@ from app.db import (
     kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
     partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
     partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
-    vendor_targets, VENDOR_REGISTRATION_STATUSES,
+    vendor_targets, VENDOR_REGISTRATION_STATUSES, record_people,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -322,24 +322,97 @@ def can_assign(u, target_id: int) -> bool:
     if target["role"] == "Presales Lead" and org_root(target_id) == org_root(u["id"]): return True
     return target_id in scope_user_ids(u)
 
+# ── Extra people on a prospect ("co-owners") or an action ("co-assignees") ──
+# The primary owner_id / assigned_to columns keep working exactly as before; these are additional people stored in
+# record_people. Only Admin and Super Admin can change them.
+def is_admin_role(u) -> bool:
+    return u["role"] in ("Super Admin","Admin")
+
+def people_map(entity_type, ids=None):
+    """{entity_id: [{"id","name"}, ...]} of the extra people, in the order they were added."""
+    stmt=select(record_people.c.entity_id,record_people.c.user_id,users.c.name).select_from(record_people.join(users,users.c.id==record_people.c.user_id)).where(record_people.c.entity_type==entity_type).order_by(record_people.c.id)
+    if ids is not None:
+        ids=list(ids)
+        if not ids: return {}
+        if len(ids)<=500: stmt=stmt.where(record_people.c.entity_id.in_(ids))
+    out={}
+    for r in rows(stmt): out.setdefault(r["entity_id"],[]).append({"id":r["user_id"],"name":r["name"]})
+    return out
+
+def attach_people(items, entity_type, key):
+    pm=people_map(entity_type,[i["id"] for i in items]) if items else {}
+    for i in items: i[key]=pm.get(i["id"],[])
+    return items
+
+def extra_person_ids(entity_type, entity_id) -> list[int]:
+    return [r["user_id"] for r in rows(select(record_people.c.user_id).where(and_(record_people.c.entity_type==entity_type,record_people.c.entity_id==entity_id)).order_by(record_people.c.id))]
+
+def parse_person_ids(v, label) -> list[int]:
+    if v is None: return []
+    if not isinstance(v,list): raise HTTPException(400,f"{label} must be a list of users")
+    out=[]
+    for x in v:
+        try: i=int(x)
+        except (TypeError,ValueError): raise HTTPException(400,f"{label} contains an invalid user")
+        if i not in out: out.append(i)
+    return out
+
+def plan_people(u, entity_type, entity_id, primary_id, wanted, label):
+    """Work out who to add/remove so the extras equal `wanted` (minus the primary). Validates everything and writes nothing,
+    so a failing request never leaves a half-applied change. Returns (added, removed)."""
+    wanted=[i for i in wanted if i!=primary_id]
+    current=extra_person_ids(entity_type,entity_id) if entity_id else []
+    added=[i for i in wanted if i not in current]; removed=[i for i in current if i not in wanted]
+    if not added and not removed: return [],[]
+    if not is_admin_role(u): raise HTTPException(403,f"Only an Admin or Super Admin can change the additional {label}")
+    for i in added:
+        if not can_assign(u,i): raise HTTPException(403,f"You cannot add that person to the additional {label}")
+    return added,removed
+
+def apply_people(u, entity_type, entity_id, added, removed):
+    with engine.begin() as c:
+        if removed: c.execute(delete(record_people).where(and_(record_people.c.entity_type==entity_type,record_people.c.entity_id==entity_id,record_people.c.user_id.in_(removed))))
+        for i in added: c.execute(insert(record_people).values(entity_type=entity_type,entity_id=entity_id,user_id=i,created_by=u["id"]))
+
+def drop_person(entity_type, entity_id, user_id):
+    """A person promoted to primary must not stay listed as an extra as well."""
+    execute(delete(record_people).where(and_(record_people.c.entity_type==entity_type,record_people.c.entity_id==entity_id,record_people.c.user_id==user_id)))
+
+def clear_people(entity_type, entity_ids):
+    entity_ids=list(entity_ids)
+    if entity_ids: execute(delete(record_people).where(and_(record_people.c.entity_type==entity_type,record_people.c.entity_id.in_(entity_ids))))
+
+def is_assignee(a, user_id) -> bool:
+    return a["assigned_to"]==user_id or any(p["id"]==user_id for p in a.get("co_assignees") or [])
+
+def notify_assigned(user_ids, title, message, entity_type, entity_id, due_date):
+    for uid in user_ids:
+        execute(insert(notifications).values(user_id=uid,notification_type="Action Assigned",title=title,message=message,entity_type=entity_type,entity_id=entity_id,due_date=due_date,severity="info"))
+
 def has_share(entity_type, entity_id, user_id, edit=False):
     stmt=select(record_shares.c.id, record_shares.c.access_level).where(and_(record_shares.c.entity_type==entity_type, record_shares.c.entity_id==entity_id, record_shares.c.user_id==user_id))
     r=row(stmt)
     return bool(r and (not edit or r["access_level"]=="edit"))
 
-def can_view_lead(u, lead_id: int) -> bool:
+def lead_owner_ids(lead_id: int) -> list[int]:
+    """Primary owner first, then any co-owners."""
     l=row(select(leads.c.owner_id).where(leads.c.id==lead_id))
-    if not l: return False
-    if l["owner_id"] in scope_user_ids(u) or has_share("lead", lead_id, u["id"]): return True
+    return [l["owner_id"]]+extra_person_ids("lead",lead_id) if l else []
+
+def can_view_lead(u, lead_id: int) -> bool:
+    owners=lead_owner_ids(lead_id)
+    if not owners: return False
+    if set(owners)&set(scope_user_ids(u)) or has_share("lead", lead_id, u["id"]): return True
     if u["role"] == "Presales Lead":
         if row(select(actions.c.id).where(and_(actions.c.lead_id==lead_id, actions.c.assigned_to==u["id"])).limit(1)): return True
+        if row(select(record_people.c.id).select_from(record_people.join(actions,actions.c.id==record_people.c.entity_id)).where(and_(record_people.c.entity_type=="action",record_people.c.user_id==u["id"],actions.c.lead_id==lead_id)).limit(1)): return True
         if row(select(opportunity_team.c.opportunity_id).select_from(opportunity_team.join(opportunities, opportunities.c.id==opportunity_team.c.opportunity_id)).where(and_(opportunities.c.lead_id==lead_id, opportunity_team.c.user_id==u["id"])).limit(1)): return True
     return False
 
 def can_edit_lead(u, lead_id: int) -> bool:
     if "LEAD_EDIT" not in u["permissions"]: return False
-    l=row(select(leads.c.owner_id).where(leads.c.id==lead_id))
-    return bool(l and (l["owner_id"] in scope_user_ids(u) or has_share("lead", lead_id, u["id"], True)))
+    owners=lead_owner_ids(lead_id)
+    return bool(owners and (set(owners)&set(scope_user_ids(u)) or has_share("lead", lead_id, u["id"], True)))
 
 def can_view_opp(u, opp_id: int) -> bool:
     o=row(select(opportunities.c.owner_id, opportunities.c.presales_owner_id).where(opportunities.c.id==opp_id))
@@ -429,9 +502,10 @@ def lead_rows(u):
     stmt=select(leads, companies.c.name.label("company_name"), companies.c.vertical, companies.c.website, companies.c.linkedin_url, companies.c.external_url, owner.c.name.label("owner_name")).select_from(
         leads.join(companies, companies.c.id==leads.c.company_id).join(owner, owner.c.id==leads.c.owner_id)
     ).order_by(leads.c.updated_at.desc())
-    base=rows(stmt); out=[]
+    base=rows(stmt); out=[]; co=people_map("lead")
     for x in base:
         if can_view_lead(u,x["id"]):
+            x["co_owners"]=co.get(x["id"],[])
             ct=row(select(contacts.c.name).where(contacts.c.company_id==x["company_id"]).order_by(contacts.c.is_primary.desc(),contacts.c.id).limit(1))
             x["primary_contact"]=ct["name"] if ct else None
             ac=row(select(func.count()).select_from(actions).where(and_(actions.c.lead_id==x["id"], actions.c.status.not_in(["Completed","Cancelled"]))))
@@ -796,6 +870,8 @@ def create_lead_full(p:Payload,u=Depends(require_csrf)):
     if "LEAD_CREATE" not in u["permissions"]: raise HTTPException(403,"Lead create permission required")
     d=p.data; l=d.get("lead") or {}; owner_id=int(l.get("owner_id") or u["id"])
     if not can_assign(u,owner_id): raise HTTPException(403,"You cannot assign this lead to that user")
+    co_owner_ids=[i for i in parse_person_ids(l.get("co_owner_ids"),"Additional owners") if i!=owner_id]
+    if co_owner_ids: plan_people(u,"lead",None,owner_id,co_owner_ids,"owners")
     company_id=d.get("company_id")
     if company_id:
         if not row(select(companies.c.id).where(companies.c.id==int(company_id))): raise HTTPException(404,"Company not found")
@@ -807,12 +883,13 @@ def create_lead_full(p:Payload,u=Depends(require_csrf)):
         if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Select the existing company.")
         company_id=execute(insert(companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=classify_vertical(comp["vertical"]),website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
     lead_id=execute(insert(leads).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
+    if co_owner_ids: apply_people(u,"lead",lead_id,co_owner_ids,[])
     for idx,ct in enumerate(d.get("contacts") or []):
         if ct.get("name"):
             ne=normalize_email(ct.get("email"))
             if ne and row(select(contacts.c.id).where(and_(contacts.c.company_id==company_id,contacts.c.normalized_email==ne,contacts.c.active==True))): continue
             execute(insert(contacts).values(company_id=company_id,name=ct["name"],designation=ct.get("designation"),department=ct.get("department"),email=ct.get("email"),normalized_email=ne,phone=ct.get("phone"),linkedin_url=ct.get("linkedin_url"),location=ct.get("location"),remarks=ct.get("remarks"),is_primary=bool(ct.get("is_primary") or idx==0),active=True,created_by=u["id"]))
-    audit(u["id"],"lead",lead_id,"CREATE",{"company_id":company_id,"owner_id":owner_id}); return lead_detail(lead_id,u)
+    audit(u["id"],"lead",lead_id,"CREATE",{"company_id":company_id,"owner_id":owner_id,"co_owner_ids":co_owner_ids}); return lead_detail(lead_id,u)
 
 @app.get("/api/leads")
 def list_leads(u=Depends(require_perm("LEAD_VIEW"))): return lead_rows(u)
@@ -833,6 +910,7 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     aa=users.alias("aa")
     acts=rows(select(actions,aa.c.name.label("assigned_to_name")).select_from(actions.join(aa,aa.c.id==actions.c.assigned_to)).where(actions.c.lead_id==lead_id).order_by(actions.c.due_date,actions.c.id.desc()))
     for a in acts: a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<today_str()
+    attach_people(acts,"action","co_assignees"); l["co_owners"]=people_map("lead",[lead_id]).get(lead_id,[])
     opps=[x for x in opportunity_rows(u) if x["lead_id"]==lead_id]
     fs=[]
     for o in opps:
@@ -843,7 +921,7 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     timeline=[]
     for m in mts: timeline.append({"date":m["meeting_date"],"type":"Meeting","title":m["meeting_type"],"detail":m.get("remarks") or m.get("purpose")})
     for mo in ms: timeline.append({"date":str(mo["created_at"])[:10],"type":"MoM","title":"Minutes of Meeting","detail":mo.get("summary")})
-    for a in acts: timeline.append({"date":a["action_date"],"type":"Action","title":a["description"],"detail":f"{a['assigned_to_name']} · {a['status']} · due {a['due_date']}"})
+    for a in acts: timeline.append({"date":a["action_date"],"type":"Action","title":a["description"],"detail":f"{', '.join([a['assigned_to_name']]+[p['name'] for p in a['co_assignees']])} · {a['status']} · due {a['due_date']}"})
     for o in opps: timeline.append({"date":str(o["created_at"])[:10],"type":"Opportunity","title":o["name"],"detail":f"{o['status']} · {o['forecast_category']}"})
     for f in fs: timeline.append({"date":f["follow_up_date"],"type":"Follow-up","title":f["opportunity_name"],"detail":f.get("response") or f.get("remarks")})
     timeline.sort(key=lambda x:x["date"] or "",reverse=True)
@@ -862,7 +940,7 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
     editable=can_edit_lead(u,lead_id)
     related=can_access_company_relationship(u,l["company_id"])
     perms={"can_edit":editable,"can_edit_company":related and "COMPANY_EDIT" in u["permissions"],"can_edit_contacts":related and "CONTACT_EDIT" in u["permissions"],
-           "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_delete":editable and u["role"] in ("Super Admin","Admin")}
+           "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_manage_owners":editable and "LEAD_REASSIGN" in u["permissions"] and is_admin_role(u),"can_delete":editable and u["role"] in ("Super Admin","Admin")}
     # Contact fields this role may not see or change (field permissions); the edit form keeps them locked
     perms["locked_contact_fields"]=[f for f in ("name","designation","email","phone","linkedin_url") if not all(field_access(u,"contact",f))]
     return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
@@ -888,7 +966,15 @@ def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
         oid=int(d["owner_id"])
         if "LEAD_REASSIGN" not in u["permissions"] or not can_assign(u,oid): raise HTTPException(403,"You cannot reassign this lead")
         vals["owner_id"]=oid
-    vals["updated_at"]=utcnow(); execute(update(leads).where(leads.c.id==lead_id).values(**vals)); audit(u["id"],"lead",lead_id,"UPDATE",d); return lead_detail(lead_id,u)
+    added=removed=[]
+    if "co_owner_ids" in d:
+        primary=vals.get("owner_id") or row(select(leads.c.owner_id).where(leads.c.id==lead_id))["owner_id"]
+        added,removed=plan_people(u,"lead",lead_id,primary,parse_person_ids(d["co_owner_ids"],"Additional owners"),"owners")
+        if (added or removed) and "LEAD_REASSIGN" not in u["permissions"]: raise HTTPException(403,"You cannot reassign this lead")
+    vals["updated_at"]=utcnow(); execute(update(leads).where(leads.c.id==lead_id).values(**vals))
+    if added or removed: apply_people(u,"lead",lead_id,added,removed)
+    if "owner_id" in vals: drop_person("lead",lead_id,vals["owner_id"])
+    audit(u["id"],"lead",lead_id,"UPDATE",d); return lead_detail(lead_id,u)
 
 @app.delete("/api/leads/{lead_id}")
 def delete_lead(lead_id:int,u=Depends(require_csrf)):
@@ -901,6 +987,8 @@ def delete_lead(lead_id:int,u=Depends(require_csrf)):
         execute(delete(followups).where(followups.c.opportunity_id.in_(opp_ids)))
         execute(delete(opportunity_team).where(opportunity_team.c.opportunity_id.in_(opp_ids)))
         execute(delete(opportunities).where(opportunities.c.lead_id==lead_id))
+    clear_people("action",[r["id"] for r in rows(select(actions.c.id).where(actions.c.lead_id==lead_id))])
+    clear_people("lead",[lead_id])
     execute(delete(actions).where(actions.c.lead_id==lead_id))
     execute(delete(mom_attachments).where(mom_attachments.c.lead_id==lead_id))
     execute(delete(moms).where(moms.c.lead_id==lead_id))
@@ -1017,12 +1105,13 @@ def list_meetings(u=Depends(require_perm("LEAD_VIEW"))):
 def list_actions(filter:str=Query(default="all"),u=Depends(current_user)):
     aa=users.alias("aa"); cr=users.alias("cr")
     base=rows(select(actions,companies.c.name.label("company_name"),leads.c.temperature,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(actions.join(leads,leads.c.id==actions.c.lead_id).join(companies,companies.c.id==leads.c.company_id).join(aa,aa.c.id==actions.c.assigned_to).join(cr,cr.c.id==actions.c.created_by)).order_by(actions.c.due_date))
-    out=[]; t=today_str()
+    out=[]; t=today_str(); co=people_map("action")
     for a in base:
-        visible=a["assigned_to"]==u["id"] or can_view_lead(u,a["lead_id"])
+        a["co_assignees"]=co.get(a["id"],[])
+        visible=is_assignee(a,u["id"]) or can_view_lead(u,a["lead_id"])
         if not visible: continue
         a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<t
-        if filter=="my" and a["assigned_to"]!=u["id"]: continue
+        if filter=="my" and not is_assignee(a,u["id"]): continue
         if filter=="overdue" and not a["overdue"]: continue
         if filter=="today" and not (a["status"] not in ("Completed","Cancelled") and a["due_date"]==t): continue
         if filter=="upcoming" and not (a["status"] not in ("Completed","Cancelled") and a["due_date"]>t): continue
@@ -1036,23 +1125,37 @@ def add_action(lead_id:int,p:Payload,u=Depends(require_csrf)):
     d=p.data; assigned=int(d.get("assigned_to") or u["id"])
     if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
     if not d.get("description") or not d.get("due_date"): raise HTTPException(400,"Action description and due date are required")
+    co_ids=[i for i in parse_person_ids(d.get("co_assignee_ids"),"Additional assignees") if i!=assigned]
+    if co_ids: plan_people(u,"action",None,assigned,co_ids,"assignees")
     aid=execute(insert(actions).values(lead_id=lead_id,opportunity_id=d.get("opportunity_id") or None,action_date=d.get("action_date") or today_str(),description=d["description"],assigned_to=assigned,due_date=d["due_date"],status=d.get("status") or "Open",priority=d.get("priority") or "Medium",remarks=d.get("remarks"),created_by=u["id"]))
-    execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="New action assigned",message=d["description"],entity_type="action",entity_id=aid,due_date=d["due_date"],severity="info")); audit(u["id"],"action",aid,"CREATE",d); return row(select(actions).where(actions.c.id==aid))
+    if co_ids: apply_people(u,"action",aid,co_ids,[])
+    notify_assigned([assigned]+co_ids,"New action assigned",d["description"],"action",aid,d["due_date"]); audit(u["id"],"action",aid,"CREATE",d)
+    return attach_people([row(select(actions).where(actions.c.id==aid))],"action","co_assignees")[0]
 
 @app.put("/api/actions/{action_id}")
 def update_action(action_id:int,p:Payload,u=Depends(require_csrf)):
     a=row(select(actions).where(actions.c.id==action_id));
     if not a: raise HTTPException(404,"Action not found")
-    if "ACTION_EDIT" not in u["permissions"] or (a["assigned_to"]!=u["id"] and not can_edit_lead(u,a["lead_id"])): raise HTTPException(403,"You cannot update this action")
+    a["co_assignees"]=people_map("action",[action_id]).get(action_id,[])
+    if "ACTION_EDIT" not in u["permissions"] or (not is_assignee(a,u["id"]) and not can_edit_lead(u,a["lead_id"])): raise HTTPException(403,"You cannot update this action")
     d=p.data; vals={k:d[k] for k in ("description","assigned_to","due_date","status","priority","remarks","completion_date") if k in d}
     if d.get("status")=="Completed" and not d.get("completion_date"): vals["completion_date"]=today_str()
-    vals["updated_at"]=utcnow(); execute(update(actions).where(actions.c.id==action_id).values(**vals)); audit(u["id"],"action",action_id,"UPDATE",d); return row(select(actions).where(actions.c.id==action_id))
+    added=removed=[]
+    if "co_assignee_ids" in d:
+        primary=int(vals["assigned_to"]) if vals.get("assigned_to") else a["assigned_to"]
+        added,removed=plan_people(u,"action",action_id,primary,parse_person_ids(d["co_assignee_ids"],"Additional assignees"),"assignees")
+    vals["updated_at"]=utcnow(); execute(update(actions).where(actions.c.id==action_id).values(**vals))
+    if added or removed: apply_people(u,"action",action_id,added,removed)
+    if vals.get("assigned_to"): drop_person("action",action_id,int(vals["assigned_to"]))
+    if added: notify_assigned(added,"Action assigned to you",vals.get("description") or a["description"],"action",action_id,vals.get("due_date") or a["due_date"])
+    audit(u["id"],"action",action_id,"UPDATE",d); return attach_people([row(select(actions).where(actions.c.id==action_id))],"action","co_assignees")[0]
 
 @app.delete("/api/actions/{action_id}")
 def delete_action(action_id:int,u=Depends(require_csrf)):
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Only Super Admin and Admin can delete actions")
     a=row(select(actions).where(actions.c.id==action_id))
     if not a: raise HTTPException(404,"Action not found")
+    clear_people("action",[action_id])
     execute(delete(actions).where(actions.c.id==action_id))
     audit(u["id"],"action",action_id,"DELETE",{"description":a["description"]}); return {"ok":True}
 
@@ -1067,8 +1170,8 @@ def _valid_date(v):
 
 def generic_action_access(u,a):
     """Same hierarchy rule as prospect actions: your own, ones you created, and your reporting team's."""
-    ids=set(scope_user_ids(u))
-    visible=is_super(u) or a["assigned_to"]==u["id"] or a["created_by"]==u["id"] or a["assigned_to"] in ids or a["created_by"] in ids
+    ids=set(scope_user_ids(u)); co={p["id"] for p in a.get("co_assignees") or []}
+    visible=is_super(u) or a["assigned_to"]==u["id"] or a["created_by"]==u["id"] or a["assigned_to"] in ids or a["created_by"] in ids or u["id"] in co or bool(co&ids)
     can_edit=visible and "ACTION_EDIT" in u["permissions"]
     can_delete=visible and (u["role"] in ("Super Admin","Admin") or a["created_by"]==u["id"])
     return visible,can_edit,can_delete
@@ -1077,6 +1180,7 @@ def generic_action_row(action_id,u):
     aa=users.alias("aa"); cr=users.alias("cr")
     r=row(select(generic_actions,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to).join(cr,cr.c.id==generic_actions.c.created_by)).where(generic_actions.c.id==action_id))
     if r:
+        attach_people([r],"generic_action","co_assignees")
         _,r["can_edit"],r["can_delete"]=generic_action_access(u,r)
         r["overdue"]=r["status"] not in ("Completed","Cancelled") and r["due_date"]<today_str()
     return r
@@ -1087,12 +1191,14 @@ def list_generic_actions(filter:str=Query(default="all"),u=Depends(current_user)
     stmt=select(generic_actions,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to).join(cr,cr.c.id==generic_actions.c.created_by))
     if not is_super(u):
         ids=scope_user_ids(u)
-        stmt=stmt.where(or_(generic_actions.c.assigned_to.in_(ids),generic_actions.c.created_by.in_(ids)))
-    t=today_str(); out=[]
+        co_visible=select(record_people.c.entity_id).where(and_(record_people.c.entity_type=="generic_action",record_people.c.user_id.in_(ids)))
+        stmt=stmt.where(or_(generic_actions.c.assigned_to.in_(ids),generic_actions.c.created_by.in_(ids),generic_actions.c.id.in_(co_visible)))
+    t=today_str(); out=[]; co=people_map("generic_action")
     for a in rows(stmt.order_by(generic_actions.c.due_date,generic_actions.c.id)):
         open_=a["status"] not in ("Completed","Cancelled")
         a["overdue"]=open_ and a["due_date"]<t
-        if filter=="my" and a["assigned_to"]!=u["id"]: continue
+        a["co_assignees"]=co.get(a["id"],[])
+        if filter=="my" and not is_assignee(a,u["id"]): continue
         if filter=="overdue" and not a["overdue"]: continue
         if filter=="today" and not (open_ and a["due_date"]==t): continue
         if filter=="upcoming" and not (open_ and a["due_date"]>t): continue
@@ -1133,17 +1239,20 @@ def create_generic_action(p:Payload,u=Depends(require_csrf)):
     d=p.data; vals=_generic_action_values(d,partial=False)
     assigned=int(d.get("assigned_to") or u["id"])
     if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
+    co_ids=[i for i in parse_person_ids(d.get("co_assignee_ids"),"Additional assignees") if i!=assigned]
+    if co_ids: plan_people(u,"generic_action",None,assigned,co_ids,"assignees")
     if vals["status"]=="Completed": vals["completion_date"]=today_str()
     aid=execute(insert(generic_actions).values(**vals,assigned_to=assigned,created_by=u["id"]))
-    if assigned!=u["id"]:
-        execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="New action assigned",message=vals["title"],entity_type="generic_action",entity_id=aid,due_date=vals["due_date"],severity="info"))
-    audit(u["id"],"generic_action",aid,"CREATE",{**vals,"assigned_to":assigned})
+    if co_ids: apply_people(u,"generic_action",aid,co_ids,[])
+    notify_assigned([i for i in [assigned]+co_ids if i!=u["id"]],"New action assigned",vals["title"],"generic_action",aid,vals["due_date"])
+    audit(u["id"],"generic_action",aid,"CREATE",{**vals,"assigned_to":assigned,"co_assignee_ids":co_ids})
     return generic_action_row(aid,u)
 
 @app.put("/api/generic-actions/{action_id}")
 def update_generic_action(action_id:int,p:Payload,u=Depends(require_csrf)):
     a=row(select(generic_actions).where(generic_actions.c.id==action_id))
     if not a: raise HTTPException(404,"Action not found")
+    a["co_assignees"]=people_map("generic_action",[action_id]).get(action_id,[])
     visible,can_edit,_=generic_action_access(u,a)
     if not visible: raise HTTPException(404,"Action not found")
     if not can_edit: raise HTTPException(403,"You cannot update this action")
@@ -1152,11 +1261,17 @@ def update_generic_action(action_id:int,p:Payload,u=Depends(require_csrf)):
         assigned=int(d["assigned_to"])
         if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
         vals["assigned_to"]=assigned
-        execute(insert(notifications).values(user_id=assigned,notification_type="Action Assigned",title="Action assigned to you",message=vals.get("title") or a["title"],entity_type="generic_action",entity_id=action_id,due_date=vals.get("due_date") or a["due_date"],severity="info"))
+        notify_assigned([assigned],"Action assigned to you",vals.get("title") or a["title"],"generic_action",action_id,vals.get("due_date") or a["due_date"])
+    added=removed=[]
+    if "co_assignee_ids" in d:
+        added,removed=plan_people(u,"generic_action",action_id,vals.get("assigned_to",a["assigned_to"]),parse_person_ids(d["co_assignee_ids"],"Additional assignees"),"assignees")
     if vals.get("status")=="Completed" and a["status"]!="Completed": vals["completion_date"]=today_str()
     elif vals.get("status") and vals["status"]!="Completed": vals["completion_date"]=None
     vals["updated_at"]=utcnow()
     execute(update(generic_actions).where(generic_actions.c.id==action_id).values(**vals))
+    if added or removed: apply_people(u,"generic_action",action_id,added,removed)
+    if vals.get("assigned_to"): drop_person("generic_action",action_id,vals["assigned_to"])
+    if added: notify_assigned(added,"Action assigned to you",vals.get("title") or a["title"],"generic_action",action_id,vals.get("due_date") or a["due_date"])
     audit(u["id"],"generic_action",action_id,"UPDATE",d)
     return generic_action_row(action_id,u)
 
@@ -1164,9 +1279,11 @@ def update_generic_action(action_id:int,p:Payload,u=Depends(require_csrf)):
 def delete_generic_action(action_id:int,u=Depends(require_csrf)):
     a=row(select(generic_actions).where(generic_actions.c.id==action_id))
     if not a: raise HTTPException(404,"Action not found")
+    a["co_assignees"]=people_map("generic_action",[action_id]).get(action_id,[])
     visible,_,can_delete=generic_action_access(u,a)
     if not visible: raise HTTPException(404,"Action not found")
     if not can_delete: raise HTTPException(403,"Only Super Admin, Admin or the creator can delete this action")
+    clear_people("generic_action",[action_id])
     execute(delete(generic_actions).where(generic_actions.c.id==action_id))
     audit(u["id"],"generic_action",action_id,"DELETE",{"title":a["title"]}); return {"ok":True}
 
@@ -1391,7 +1508,7 @@ def run_workflows_for_user(u):
     action_cfg=workflow_rule("ACTION_OVERDUE")
     if action_cfg is not None:
         for a in list_actions("all",u):
-            if a["assigned_to"]==u["id"] and a["status"] not in ("Completed","Cancelled") and a["due_date"]<=ts:
+            if is_assignee(a,u["id"]) and a["status"] not in ("Completed","Cancelled") and a["due_date"]<=ts:
                 add_notice_once(u["id"],"ACTION_DUE","Action overdue" if a["due_date"]<ts else "Action due today",f"{a['company_name']} · {a['description']}","action",a["id"],a["due_date"],"critical" if a["due_date"]<ts else "warning")
     response_cfg=workflow_rule("AWAITING_RESPONSE")
     close_cfg=workflow_rule("CLOSE_DATE")
@@ -1596,6 +1713,7 @@ def lead_visibility_condition(u):
     conds=[leads.c.owner_id.in_(owner_ids)]
     shared=select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type=="Lead",record_shares.c.user_id==u["id"]))
     conds.append(leads.c.id.in_(shared))
+    conds.append(leads.c.id.in_(select(record_people.c.entity_id).where(and_(record_people.c.entity_type=="lead",record_people.c.user_id.in_(owner_ids)))))
     return or_(*conds)
 
 def opportunity_visibility_condition(u):
@@ -1631,9 +1749,9 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
     joined=leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)
     base=select(leads,companies.c.name.label("company_name"),companies.c.vertical,owner.c.name.label("owner_name"),primary.label("primary_contact")).select_from(joined).where(lead_visibility_condition(u))
     common=[]
-    if q: common.append(or_(func.lower(companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(leads.c.remarks," ")).like(f"%{q.lower()}%"),func.lower(owner.c.name).like(f"%{q.lower()}%")))
+    if q: common.append(or_(func.lower(companies.c.name).like(f"%{q.lower()}%"),func.lower(func.coalesce(leads.c.remarks," ")).like(f"%{q.lower()}%"),func.lower(owner.c.name).like(f"%{q.lower()}%"),leads.c.id.in_(select(record_people.c.entity_id).select_from(record_people.join(users,users.c.id==record_people.c.user_id)).where(and_(record_people.c.entity_type=="lead",func.lower(users.c.name).like(f"%{q.lower()}%"))))))
     if status: common.append(leads.c.status==status)
-    if owner_id: common.append(leads.c.owner_id==owner_id)
+    if owner_id: common.append(or_(leads.c.owner_id==owner_id,leads.c.id.in_(select(record_people.c.entity_id).where(and_(record_people.c.entity_type=="lead",record_people.c.user_id==owner_id)))))
     if region=="__none__": common.append(or_(leads.c.region.is_(None),leads.c.region==""))
     elif region: common.append(leads.c.region==region)
     t=today_str(); week=(date.today()+timedelta(days=7)).isoformat()
@@ -1652,7 +1770,7 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
             "has_empty_follow_up":any(not r["next_follow_up"] for r in facet_rows),
             "regions":sorted(distinct("region"),key=str.lower),
             "has_empty_region":any(not r["region"] for r in facet_rows),
-            "owners":sorted([{"id":oid,"name":n} for oid,n in {(r["owner_id"],r["owner_name"]) for r in facet_rows}],key=lambda x:(x["name"] or "").lower())}
+            "owners":sorted([{"id":oid,"name":n} for oid,n in {(r["owner_id"],r["owner_name"]) for r in facet_rows}|{(r["user_id"],r["name"]) for r in rows(select(record_people.c.user_id,users.c.name).select_from(record_people.join(users,users.c.id==record_people.c.user_id)).where(and_(record_people.c.entity_type=="lead",record_people.c.entity_id.in_(select(leads.c.id).where(lead_visibility_condition(u))))).distinct())}],key=lambda x:(x["name"] or "").lower())}
     if common: base=base.where(*common)
     summary_stmt=select(leads.c.temperature,func.count(leads.c.id).label("count")).select_from(leads.join(companies,companies.c.id==leads.c.company_id).join(owner,owner.c.id==leads.c.owner_id)).where(lead_visibility_condition(u),*common).group_by(leads.c.temperature)
     temp_counts={r["temperature"]:r["count"] for r in rows(summary_stmt)}
@@ -1676,9 +1794,13 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
     if "LEAD_EDIT" in u["permissions"] and items:
         scope=set(scope_user_ids(u))
         shared_edit={r["entity_id"] for r in rows(select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type=="lead",record_shares.c.user_id==u["id"],record_shares.c.access_level=="edit",record_shares.c.entity_id.in_([i["id"] for i in items]))))}
-        for i in items: i["can_edit"]=i["owner_id"] in scope or i["id"] in shared_edit
+        co=people_map("lead",[i["id"] for i in items])
+        for i in items:
+            i["co_owners"]=co.get(i["id"],[])
+            i["can_edit"]=i["owner_id"] in scope or i["id"] in shared_edit or any(p["id"] in scope for p in i["co_owners"])
     else:
-        for i in items: i["can_edit"]=False
+        co=people_map("lead",[i["id"] for i in items])
+        for i in items: i["can_edit"]=False; i["co_owners"]=co.get(i["id"],[])
     return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"facets":facets,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
 
 @app.get("/api/query/opportunities")

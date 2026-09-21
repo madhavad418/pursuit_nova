@@ -79,6 +79,42 @@ export function TagsInput({ options = [], value = '', onChange, disabled, requir
     </div>}
   </div>
 }
+// Pick any number of people (ids). `users` is the assignable list; `known` are people already on the record who may be
+// outside it, so their chips always show a name. `exclude` is the primary owner/assignee, who is never listed twice.
+export function PeoplePicker({ users = [], known = [], value = [], onChange, exclude, disabled, placeholder = 'Add a person…' }) {
+  const [text, setText] = useState('')
+  const [open, setOpen] = useState(false)
+  const [hi, setHi] = useState(0)
+  const wrapRef = useRef(null)
+  const ids = value.map(String)
+  const byId = new Map([...known, ...users].map(p => [String(p.id), p]))
+  const suggestions = users.filter(p => String(p.id) !== String(exclude) && !ids.includes(String(p.id)) && (!text || `${p.name} ${p.role || ''}`.toLowerCase().includes(text.toLowerCase())))
+  useEffect(() => { setHi(0) }, [text, open])
+  useEffect(() => {
+    if (!open) return
+    const close = e => { if (!wrapRef.current?.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+  const add = p => { setText(''); setOpen(false); if (p && !ids.includes(String(p.id))) onChange?.([...value, p.id]) }
+  const remove = id => onChange?.(value.filter(v => String(v) !== String(id)))
+  const onKeyDown = e => {
+    if (disabled) return
+    if (e.key === 'ArrowDown' && open && suggestions.length) { e.preventDefault(); setHi(h => Math.min(h + 1, suggestions.length - 1)) }
+    else if (e.key === 'ArrowUp' && open && suggestions.length) { e.preventDefault(); setHi(h => Math.max(h - 1, 0)) }
+    else if (e.key === 'Enter') { e.preventDefault(); if (open && suggestions[hi]) add(suggestions[hi]) }
+    else if (e.key === 'Escape') setOpen(false)
+    else if (e.key === 'Backspace' && !text && value.length) remove(value[value.length - 1])
+  }
+  return <div className={classNames('tags-input', disabled && 'disabled')} ref={wrapRef}>
+    {value.map(id => <span className="tag-chip" key={id}>{byId.get(String(id))?.name || `User ${id}`}{!disabled && <button type="button" onClick={() => remove(id)} aria-label={`Remove ${byId.get(String(id))?.name || id}`}>×</button>}</span>)}
+    {!disabled && <input className="tags-input-field" autoComplete="off" value={text} onChange={e => { setText(e.target.value); setOpen(true) }}
+      onFocus={() => setOpen(true)} onKeyDown={onKeyDown} placeholder={value.length ? '' : placeholder} aria-label="Add a person"/>}
+    {!disabled && open && suggestions.length > 0 && <div className="tags-suggest" onMouseDown={e => e.preventDefault()}>
+      {suggestions.map((p, i) => <button type="button" key={p.id} className={i === hi ? 'hi' : ''} onClick={() => add(p)}>{p.name}{p.role ? ` · ${p.role}` : ''}</button>)}
+    </div>}
+  </div>
+}
 export function Textarea(props) { return <textarea className="input textarea" rows="3" {...props}/> }
 export function Pagination({ page, pages, onPage }) {
   if (!pages || pages <= 1) return null
