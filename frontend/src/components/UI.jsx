@@ -124,5 +124,9 @@ export function SectionHeader({ eyebrow, title, text, actions }) { return <div c
 export function Table({ columns, rows, onRowClick, keyField='id' }) {
   return <div className="table-wrap"><table><thead><tr>{columns.map(c=><th key={c.key} className={c.align==='right'?'align-right':''}>{c.header?c.header(c):c.label}</th>)}</tr></thead><tbody>{rows.map(r=><tr key={r[keyField]} onClick={()=>onRowClick?.(r)} className={onRowClick?'clickable':''}>{columns.map(c=><td key={c.key} className={c.align==='right'?'align-right':''}>{c.render?c.render(r):r[c.key]??'—'}</td>)}</tr>)}</tbody></table></div>
 }
+export function BulkBar({ count, noun, onDelete, onClear, busy }) {
+  if (!count) return null
+  return <div className="bulk-bar" role="status"><strong>{count} {noun}{count===1?'':'s'} selected</strong><Button variant="soft" className="text-danger" icon="trash" onClick={onDelete} disabled={busy}>{busy?'Deleting…':'Delete selected'}</Button><Button variant="ghost" onClick={onClear} disabled={busy}>Clear</Button></div>
+}
 export function ErrorBanner({ error, onRetry }) { if(!error) return null; return <div className="error-banner"><div><strong>Something needs attention</strong><span>{error.message || String(error)}</span></div>{onRetry&&<Button variant="ghost" icon="refresh" onClick={onRetry}>Retry</Button>}</div> }
 export function Toast({ toast, onClose }) { useEffect(()=>{if(!toast)return; const t=setTimeout(onClose,3500);return()=>clearTimeout(t)},[toast,onClose]); if(!toast)return null; return <div className={`toast toast-${toast.type||'success'}`}><Icon name={toast.type==='error'?'close':'check'} size={18}/><span>{toast.message}</span></div> }

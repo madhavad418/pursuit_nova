@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { Button, Field, Input, Modal, PeoplePicker, Select, Spinner, TagsInput, Textarea } from './UI'
+import { isRequestedHiddenAdmin, visiblePickerUsers } from '../lib/users'
 
 export const LEAD_STATUSES = ['New', 'Assigned', 'Contacted', 'Engaged', 'Not Engaged', 'Qualified', 'Converted', 'On Hold', 'Unresponsive', 'Disqualified', 'Lost']
 export const LEAD_SOURCES = ['LinkedIn', 'Referral', 'Event', 'Conference', 'Website', 'Existing Customer', 'Partner', 'Management Reference', 'Outbound', 'RFP / Tender', 'Other']
@@ -37,7 +38,7 @@ export function ProspectEditor({ leadId, open, onClose, onSaved, onToast }) {
                 owner_id: String(l.owner_id), temperature: l.temperature, source: l.source, source_detail: l.source_detail, next_follow_up: l.next_follow_up, status: l.status, remarks: l.remarks,
                 ...Object.fromEntries(Object.entries(CONTACT_KEYS).map(([k, f]) => [k, primary?.[f]]))
             }
-            setDetail({ ...d, orig, primary }); setForm(Object.fromEntries(Object.entries(orig).map(([k, v]) => [k, str(v)]))); setUsers(u); setCoOwners((l.co_owners || []).map(p => p.id))
+            setDetail({ ...d, orig, primary }); setForm(Object.fromEntries(Object.entries(orig).map(([k, v]) => [k, str(v)]))); setUsers(visiblePickerUsers(u)); setCoOwners((l.co_owners || []).map(p => p.id))
         }).catch(e => live && setError(e.message))
         return () => { live = false }
     }, [open, leadId])
@@ -81,7 +82,8 @@ export function ProspectEditor({ leadId, open, onClose, onSaved, onToast }) {
             if (done.length) onSaved?.()
         } finally { setSaving(false) }
     }
-    const ownerOptions = form && !users.some(u => String(u.id) === form.owner_id) ? [{ id: form.owner_id, name: detail?.lead.owner_name || 'Current owner', role: 'current' }, ...users] : users
+    const currentOwnerHidden = isRequestedHiddenAdmin({ id: form?.owner_id, name: detail?.lead.owner_name, role: detail?.lead.owner_role })
+    const ownerOptions = form && !users.some(u => String(u.id) === form.owner_id) ? [{ id: form.owner_id, name: currentOwnerHidden ? 'Current owner' : detail?.lead.owner_name || 'Current owner', role: 'current' }, ...users] : users
     const withCurrent = (list, v) => v && !list.includes(v) ? [v, ...list] : list
     const input = (k, props = {}) => <Input disabled={locked(k)} value={form[k]} onChange={e => set(k, e.target.value)} {...props} />
     const select = (k, options) => <Select disabled={locked(k)} value={form[k]} onChange={e => set(k, e.target.value)}>{options}</Select>
