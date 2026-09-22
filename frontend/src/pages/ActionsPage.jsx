@@ -17,6 +17,16 @@ function Assignees({ a }) {
   return co.length ? <span title={[a.assigned_to_name, ...co.map(p => p.name)].join(', ')}>{a.assigned_to_name} <small style={{ color: 'var(--muted)' }}>+{co.length}</small></span> : a.assigned_to_name
 }
 const today = () => new Date().toISOString().slice(0, 10)
+// Whole days from one YYYY-MM-DD date to another (parsed as UTC midnight so the diff is exact)
+const dayDiff = (from, to) => Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400000)
+// Post overdue column shows how many days have run from the due date to today
+const postOverdueText = (a) => {
+  if (!a.due_date || ['Completed', 'Cancelled'].includes(a.status)) return '—'
+  const n = dayDiff(a.due_date, today())
+  if (n > 0) return `${n} day${n === 1 ? '' : 's'} overdue`
+  if (n === 0) return 'Due today'
+  return `${-n} day${n === -1 ? '' : 's'} left`
+}
 const summarize = rows => ({ total: rows.length, overdue: rows.filter(x => x.overdue).length, today: rows.filter(x => x.due_date === today() && !['Completed', 'Cancelled'].includes(x.status)).length, open: rows.filter(x => !['Completed', 'Cancelled'].includes(x.status)).length })
 
 function FilterSelect({ value, onChange }) {
@@ -24,18 +34,20 @@ function FilterSelect({ value, onChange }) {
 }
 // Column headings shared by both boards; widths come from .action-cols so every row lines up
 function BoardHeader({ third, selectAll }) {
-  return <div className="action-cols action-head" role="row"><span role="columnheader">{selectAll && <input type="checkbox" className="bulk-check" aria-label="Select all actions" checked={selectAll.checked} onChange={selectAll.onChange} />}Priority</span><span role="columnheader">Action</span><span role="columnheader">{third}</span><span role="columnheader">Assigned to</span><span role="columnheader">Due</span><span role="columnheader">Status</span><span role="columnheader" className="align-end">Actions</span></div>
+  return <div className="action-cols action-head" role="row"><span role="columnheader" className="col-priority">{selectAll && <input type="checkbox" className="bulk-check" aria-label="Select all actions" checked={selectAll.checked} onChange={selectAll.onChange} />}<span>Priority</span></span><span role="columnheader">Action</span><span role="columnheader">{third}</span><span role="columnheader">Assigned to</span><span role="columnheader">Due</span><span role="columnheader">Post overdue</span><span role="columnheader">Status</span><span role="columnheader" className="align-end">Actions</span></div>
 }
 function Counts({ counts }) {
   return <div className="mini-kpis"><div><span>Open work</span><strong>{counts.open}</strong></div><div><span>Overdue</span><strong className="text-danger">{counts.overdue}</strong></div><div><span>Due today</span><strong>{counts.today}</strong></div><div><span>Visible actions</span><strong>{counts.total}</strong></div></div>
 }
 
 /* ─── Actions linked to a prospect (unchanged behaviour) ─── */
-function ProspectActions({ onToast, filter, assignableUsers }) {
+const emptyProspectAction = userId => ({ lead_id: '', description: '', assigned_to: String(userId), co_assignee_ids: [], due_date: '', post_overdue_date: today(), priority: 'Medium', remarks: '' })
+function ProspectActions({ onToast, filter, assignableUsers, createSignal }) {
   const { user } = useAuth(); const admin = isAdminRole(user.role)
   const [rows, setRows] = useState([]); const [error, setError] = useState(null)
   const [editOpen, setEditOpen] = useState(false); const [editForm, setEditForm] = useState({}); const [editSaving, setEditSaving] = useState(false)
   const [selected, setSelected] = useState([]); const [bulkBusy, setBulkBusy] = useState(false)
+  const [newOpen, setNewOpen] = useState(false); const [newForm, setNewForm] = useState(null); const [newSaving, setNewSaving] = useState(false); const [leads, setLeads] = useState([])
   const load = () => { setError(null); return api.get('/api/actions?filter=' + encodeURIComponent(filter)).then(r => { setRows(r); setSelected(s => s.filter(id => r.some(a => a.id === id))) }).catch(setError) }
   const bulkDelete = async () => {
     if (!selected.length || !confirm(`Delete ${selected.length} selected action${selected.length === 1 ? '' : 's'}?`)) return
@@ -45,11 +57,28 @@ function ProspectActions({ onToast, filter, assignableUsers }) {
   }
   const allSelected = rows.length > 0 && rows.every(a => selected.includes(a.id))
   useEffect(() => { load() }, [filter])
+  useEffect(() => { if (createSignal) { setNewForm(emptyProspectAction(user.id)); setNewOpen(true); api.get('/api/leads').then(ls => setLeads(Array.isArray(ls) ? ls : [])).catch(() => setLeads([])) } }, [createSignal])
   const counts = useMemo(() => summarize(rows), [rows])
   const update = async (a, status) => { try { await api.put(`/api/actions/${a.id}`, { status }); onToast?.({ message: `Action ${status.toLowerCase()}` }); load() } catch (e) { onToast?.({ type: 'error', message: e.message }) } }
   const deleteAction = async (a) => { if (!confirm(`Delete action "${a.description}"?`)) return; try { await api.delete(`/api/actions/${a.id}`); onToast?.({ message: 'Action deleted' }); load() } catch (e) { onToast?.({ type: 'error', message: e.message }) } }
-  const openEdit = a => { setEditForm({ id: a.id, description: a.description || '', assigned_to: String(a.assigned_to), co_assignee_ids: (a.co_assignees || []).map(p => p.id), co_known: a.co_assignees || [], due_date: a.due_date || '', status: a.status || 'Open', priority: a.priority || 'Medium', remarks: a.remarks || '', company_name: a.company_name }); setEditOpen(true) }
+  const openEdit = a => { setEditForm({ id: a.id, description: a.description || '', assigned_to: String(a.assigned_to), co_assignee_ids: (a.co_assignees || []).map(p => p.id), co_known: a.co_assignees || [], due_date: a.due_date || '', post_overdue_date: a.post_overdue_date || today(), status: a.status || 'Open', priority: a.priority || 'Medium', remarks: a.remarks || '', admin_reply: a.admin_reply || '', company_name: a.company_name }); setEditOpen(true) }
   const setE = (k, v) => setEditForm(f => ({ ...f, [k]: v }))
+  const setN = (k, v) => setNewForm(f => ({ ...f, [k]: v }))
+  const saveNew = async e => {
+    e.preventDefault()
+    const lead_id = Number(newForm.lead_id)
+    if (!lead_id) { onToast?.({ type: 'error', message: 'Choose a prospect' }); return }
+    if (!String(newForm.description || '').trim()) { onToast?.({ type: 'error', message: 'Description is required' }); return }
+    if (!newForm.due_date) { onToast?.({ type: 'error', message: 'Due date is required' }); return }
+    setNewSaving(true)
+    try {
+      const { co_known, ...fields } = newForm
+      fields.assigned_to = Number(fields.assigned_to)
+      fields.co_assignee_ids = (fields.co_assignee_ids || []).filter(x => Number(x) !== fields.assigned_to).map(Number)
+      await api.post(`/api/leads/${lead_id}/actions`, fields)
+      onToast?.({ message: 'Action created' }); setNewOpen(false); load()
+    } catch (err) { onToast?.({ type: 'error', message: err.message }) } finally { setNewSaving(false) }
+  }
   const saveEdit = async e => { e.preventDefault(); setEditSaving(true); try { const { id, company_name, co_known, ...fields } = editForm; fields.assigned_to = Number(fields.assigned_to); fields.co_assignee_ids = (fields.co_assignee_ids || []).filter(x => Number(x) !== fields.assigned_to).map(Number); await api.put(`/api/actions/${id}`, fields); onToast?.({ message: 'Action updated' }); setEditOpen(false); load() } catch (err) { onToast?.({ type: 'error', message: err.message }) } finally { setEditSaving(false) } }
   const currentActionAssignee = rows.find(r => String(r.assigned_to) === String(editForm.assigned_to))
   const hiddenCurrentActionAssignee = isRequestedHiddenAdmin({ id: editForm.assigned_to, name: currentActionAssignee?.assigned_to_name })
@@ -57,24 +86,39 @@ function ProspectActions({ onToast, filter, assignableUsers }) {
   return <>
     <Counts counts={counts} />
     <ErrorBanner error={error} onRetry={load} />
-    <section className="panel action-panel">{admin && <BulkBar count={selected.length} noun="action" onDelete={bulkDelete} onClear={() => setSelected([])} busy={bulkBusy} />}<div className="action-board" role="table">{rows.length > 0 && <BoardHeader third="Company" selectAll={admin ? { checked: allSelected, onChange: () => setSelected(allSelected ? [] : rows.map(a => a.id)) } : null} />}{rows.map(a => <div className={a.overdue ? 'action-cols action-row overdue' : 'action-cols action-row'} role="row" key={a.id}><span className={`priority priority-${String(a.priority).toLowerCase()}`} data-label="Priority">{admin && <input type="checkbox" className="bulk-check" aria-label="Select action" checked={selected.includes(a.id)} onChange={() => setSelected(s => s.includes(a.id) ? s.filter(x => x !== a.id) : [...s, a.id])} />}{a.priority}</span><button className="action-link" onClick={() => navigate(`lead/${a.lead_id}`)} title={a.description}><strong>{a.description}</strong>{a.remarks && <span>{a.remarks}</span>}</button><span className="action-cell" data-label="Company">{a.company_name}</span><span className="action-cell" data-label="Assigned to"><Assignees a={a} /></span><span className={a.overdue ? 'action-cell action-date text-danger' : 'action-cell action-date'} data-label="Due">{dateText(a.due_date)}</span><span className="action-cell" data-label="Status"><Pill tone={a.overdue ? 'danger' : statusTone(a.status)}>{a.overdue ? 'Overdue' : a.status}</Pill></span><div className="action-buttons">{a.status !== 'Completed' ? <Button variant="text" onClick={() => update(a, 'Completed')}>Complete</Button> : <span className="slot" aria-hidden="true" />}{a.status === 'Open' ? <Button variant="text" onClick={() => update(a, 'In Progress')}>Start</Button> : <span className="slot" aria-hidden="true" />}{admin ? <button className="icon-btn" title="Edit" aria-label="Edit action" onClick={() => openEdit(a)}><Icon name="edit" size={16} /></button> : <span className="slot" aria-hidden="true" />}{admin ? <button className="icon-btn text-danger" title="Delete" aria-label="Delete action" onClick={() => deleteAction(a)}><Icon name="trash" size={16} /></button> : <span className="slot" aria-hidden="true" />}</div></div>)}{!rows.length && <Empty title="No actions in this view" text="You're clear for the selected filter." />}</div></section>
+    <section className="panel action-panel">{admin && <BulkBar count={selected.length} noun="action" onDelete={bulkDelete} onClear={() => setSelected([])} busy={bulkBusy} />}<div className="action-board" role="table">{rows.length > 0 && <BoardHeader third="Company" selectAll={admin ? { checked: allSelected, onChange: () => setSelected(allSelected ? [] : rows.map(a => a.id)) } : null} />}{rows.map(a => <div className={a.overdue ? 'action-cols action-row overdue' : 'action-cols action-row'} role="row" key={a.id}><span className="priority-cell" data-label="Priority">{admin && <input type="checkbox" className="bulk-check" aria-label="Select action" checked={selected.includes(a.id)} onChange={() => setSelected(s => s.includes(a.id) ? s.filter(x => x !== a.id) : [...s, a.id])} />}<span className={`priority priority-${String(a.priority).toLowerCase()}`}>{a.priority}</span></span><button className="action-link" onClick={() => navigate(`lead/${a.lead_id}`)} title={a.description}><strong>{a.description}</strong>{a.remarks && <span>{a.remarks}</span>}{a.admin_reply && <span className="action-reply" title={a.admin_reply}>↳ {a.admin_reply}</span>}</button><span className="action-cell" data-label="Company">{a.company_name}</span><span className="action-cell" data-label="Assigned to"><Assignees a={a} /></span><span className={a.overdue ? 'action-cell action-date text-danger' : 'action-cell action-date'} data-label="Due">{dateText(a.due_date)}</span><span className={a.overdue ? 'action-cell action-date text-danger' : 'action-cell action-date'} data-label="Post overdue">{postOverdueText(a)}</span><span className="action-cell" data-label="Status"><Pill tone={a.overdue ? 'danger' : statusTone(a.status)}>{a.overdue ? 'Overdue' : a.status}</Pill></span><div className="action-buttons">{a.status !== 'Completed' ? <Button variant="text" onClick={() => update(a, 'Completed')}>Complete</Button> : <span className="slot" aria-hidden="true" />}{a.status === 'Open' ? <Button variant="text" onClick={() => update(a, 'In Progress')}>Start</Button> : <span className="slot" aria-hidden="true" />}{admin ? <button className="icon-btn" title="Edit" aria-label="Edit action" onClick={() => openEdit(a)}><Icon name="edit" size={16} /></button> : <span className="slot" aria-hidden="true" />}{admin ? <button className="icon-btn text-danger" title="Delete" aria-label="Delete action" onClick={() => deleteAction(a)}><Icon name="trash" size={16} /></button> : <span className="slot" aria-hidden="true" />}</div></div>)}{!rows.length && <Empty title="No actions in this view" text="You're clear for the selected filter." />}</div></section>
     <Modal open={editOpen} onClose={() => setEditOpen(false)} title="Edit action" eyebrow={editForm.company_name}><form onSubmit={saveEdit}>
       <div className="form-grid">
         <Field label="Description" className="span-2"><Textarea required value={editForm.description || ''} onChange={e => setE('description', e.target.value)} /></Field>
         <Field label="Assigned to"><Select value={editForm.assigned_to || ''} onChange={e => setE('assigned_to', e.target.value)}>{actionAssigneeOptions.map(x => <option key={x.id} value={x.id}>{x.name}{x.role && x.role !== 'current' ? ` · ${x.role}` : ''}</option>)}</Select></Field>
         <Field label="Additional assignees" hint="Add as many people as needed" className="span-2"><PeoplePicker users={assignableUsers} known={editForm.co_known || []} exclude={editForm.assigned_to} value={(editForm.co_assignee_ids || []).filter(x => String(x) !== String(editForm.assigned_to))} onChange={v => setE('co_assignee_ids', v)} /></Field>
         <Field label="Due date"><Input type="date" required value={editForm.due_date || ''} onChange={e => setE('due_date', e.target.value)} /></Field>
+        <Field label="Post overdue date"><Input type="date" value={editForm.post_overdue_date || ''} onChange={e => setE('post_overdue_date', e.target.value)} /></Field>
         <Field label="Status"><Select value={editForm.status || ''} onChange={e => setE('status', e.target.value)}>{STATUSES.map(x => <option key={x}>{x}</option>)}</Select></Field>
         <Field label="Priority"><Select value={editForm.priority || ''} onChange={e => setE('priority', e.target.value)}>{PRIORITIES.map(x => <option key={x}>{x}</option>)}</Select></Field>
         <Field label="Remarks" className="span-2"><Textarea value={editForm.remarks || ''} onChange={e => setE('remarks', e.target.value)} /></Field>
+        {admin && <Field label="Reply to remarks" className="span-2" hint="Saved replies are shown to the assignee"><Textarea value={editForm.admin_reply || ''} onChange={e => setE('admin_reply', e.target.value)} placeholder="Add a reply for the assignee…" /></Field>}
       </div>
       <div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setEditOpen(false)}>Cancel</Button><Button type="submit" disabled={editSaving}>{editSaving ? 'Saving…' : 'Save changes'}</Button></div>
     </form></Modal>
+    <Modal open={newOpen && !!newForm} onClose={() => setNewOpen(false)} title="New action" eyebrow="Linked to a prospect">{newForm && <form onSubmit={saveNew}>
+      <div className="form-grid">
+        <Field label="Prospect" required className="span-2"><Select required value={newForm.lead_id} onChange={e => setN('lead_id', e.target.value)}><option value="">Select a prospect</option>{leads.map(l => <option key={l.id} value={l.id}>{l.company_name}</option>)}</Select></Field>
+        <Field label="Description" required className="span-2"><Textarea required value={newForm.description} onChange={e => setN('description', e.target.value)} /></Field>
+        <Field label="Assigned to"><Select value={newForm.assigned_to} onChange={e => setN('assigned_to', e.target.value)}>{assignableUsers.map(x => <option key={x.id} value={x.id}>{x.name}{x.role && x.role !== 'current' ? ` · ${x.role}` : ''}</option>)}</Select></Field>
+        {admin && <Field label="Additional assignees" hint="Add as many people as needed" className="span-2"><PeoplePicker users={assignableUsers} exclude={newForm.assigned_to} value={(newForm.co_assignee_ids || []).filter(x => String(x) !== String(newForm.assigned_to))} onChange={v => setN('co_assignee_ids', v)} /></Field>}
+        <Field label="Due date" required><Input type="date" required value={newForm.due_date} onChange={e => setN('due_date', e.target.value)} /></Field>
+        <Field label="Post overdue date"><Input type="date" value={newForm.post_overdue_date || ''} onChange={e => setN('post_overdue_date', e.target.value)} /></Field>
+        <Field label="Priority"><Select value={newForm.priority} onChange={e => setN('priority', e.target.value)}>{PRIORITIES.map(x => <option key={x}>{x}</option>)}</Select></Field>
+        <Field label="Remarks" className="span-2"><Textarea value={newForm.remarks} onChange={e => setN('remarks', e.target.value)} /></Field>
+      </div>
+      <div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setNewOpen(false)}>Cancel</Button><Button type="submit" disabled={newSaving}>{newSaving ? 'Creating…' : 'Create action'}</Button></div>
+    </form>}</Modal>
   </>
 }
 
 /* ─── Generic actions: work not tied to a prospect (PPT, summit preparation…) ─── */
-const emptyGeneric = userId => ({ id: null, title: '', action_type: '', description: '', assigned_to: String(userId), co_assignee_ids: [], due_date: '', priority: 'Medium', status: 'Open', remarks: '' })
+const emptyGeneric = userId => ({ id: null, title: '', action_type: '', description: '', assigned_to: String(userId), co_assignee_ids: [], due_date: '', post_overdue_date: today(), priority: 'Medium', status: 'Open', remarks: '' })
 
 function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
   const { user } = useAuth(); const admin = isAdminRole(user.role)
@@ -97,7 +141,7 @@ function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
     load()
   }
   const remove = async a => { if (!confirm(`Delete action "${a.title}"?`)) return; try { await api.delete(`/api/generic-actions/${a.id}`); onToast?.({ message: 'Action deleted' }); load() } catch (e) { fail(e) } }
-  const openEdit = a => setForm({ id: a.id, title: a.title || '', action_type: a.action_type || '', description: a.description || '', assigned_to: String(a.assigned_to), co_assignee_ids: (a.co_assignees || []).map(p => p.id), co_known: a.co_assignees || [], due_date: a.due_date || '', priority: a.priority || 'Medium', status: a.status || 'Open', remarks: a.remarks || '' })
+  const openEdit = a => setForm({ id: a.id, title: a.title || '', action_type: a.action_type || '', description: a.description || '', assigned_to: String(a.assigned_to), co_assignee_ids: (a.co_assignees || []).map(p => p.id), co_known: a.co_assignees || [], due_date: a.due_date || '', post_overdue_date: a.post_overdue_date || today(), priority: a.priority || 'Medium', status: a.status || 'Open', remarks: a.remarks || '', admin_reply: a.admin_reply || '' })
   const save = async e => {
     e.preventDefault()
     const title = form.title.trim(), action_type = form.action_type.trim()
@@ -106,6 +150,7 @@ function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
     try {
       const { id, co_known, ...fields } = form; fields.title = title; fields.action_type = action_type; fields.assigned_to = Number(fields.assigned_to)
       if (admin) fields.co_assignee_ids = (fields.co_assignee_ids || []).filter(x => Number(x) !== fields.assigned_to).map(Number); else delete fields.co_assignee_ids
+      if (!admin) delete fields.admin_reply
       if (id) { await api.put(`/api/generic-actions/${id}`, fields); onToast?.({ message: 'Action updated' }) }
       else { await api.post('/api/generic-actions', fields); onToast?.({ message: 'Action created' }) }
       setForm(null); load()
@@ -122,14 +167,16 @@ function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
     <section className="panel action-panel">{deletable.length > 0 && <BulkBar count={selected.length} noun="action" onDelete={bulkDelete} onClear={() => setSelected([])} busy={bulkBusy} />}<div className="action-board" role="table">
       {rows.length > 0 && <BoardHeader third="Type" selectAll={deletable.length ? { checked: allSelected, onChange: () => setSelected(allSelected ? [] : deletable.map(a => a.id)) } : null} />}
       {rows.map(a => <div className={a.overdue ? 'action-cols action-row overdue' : 'action-cols action-row'} role="row" key={a.id}>
-        <span className={`priority priority-${String(a.priority).toLowerCase()}`} data-label="Priority">{a.can_delete && <input type="checkbox" className="bulk-check" aria-label="Select action" checked={selected.includes(a.id)} onChange={() => setSelected(s => s.includes(a.id) ? s.filter(x => x !== a.id) : [...s, a.id])} />}{a.priority}</span>
+        <span className="priority-cell" data-label="Priority">{a.can_delete && <input type="checkbox" className="bulk-check" aria-label="Select action" checked={selected.includes(a.id)} onChange={() => setSelected(s => s.includes(a.id) ? s.filter(x => x !== a.id) : [...s, a.id])} />}<span className={`priority priority-${String(a.priority).toLowerCase()}`}>{a.priority}</span></span>
         <button className="action-link" onClick={() => setViewing(a)} title={a.title}>
           <strong>{a.title}</strong>
           {a.created_by !== a.assigned_to && <span>Created by {a.created_by_name}</span>}
+          {a.admin_reply && <span className="action-reply" title={a.admin_reply}>↳ {a.admin_reply}</span>}
         </button>
         <span className="action-cell" data-label="Type"><span className="generic-type">{a.action_type}</span></span>
         <span className="action-cell" data-label="Assigned to"><Assignees a={a} /></span>
         <span className={a.overdue ? 'action-cell action-date text-danger' : 'action-cell action-date'} data-label="Due">{dateText(a.due_date)}</span>
+        <span className={a.overdue ? 'action-cell action-date text-danger' : 'action-cell action-date'} data-label="Post overdue">{postOverdueText(a)}</span>
         <span className="action-cell" data-label="Status"><Pill tone={a.overdue ? 'danger' : statusTone(a.status)}>{a.overdue ? 'Overdue' : a.status}</Pill></span>
         <div className="action-buttons">
           {a.can_edit && a.status !== 'Completed' && a.status !== 'Cancelled' ? <Button variant="text" onClick={() => update(a, 'Completed')}>Complete</Button> : <span className="slot" aria-hidden="true" />}
@@ -148,10 +195,13 @@ function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
         <Field label="Assigned to" required><Select value={form.assigned_to} onChange={e => set('assigned_to', e.target.value)}>{assigneeOptions.map(x => <option key={x.id} value={x.id}>{x.name}{x.role && x.role !== 'current' ? ` · ${x.role}` : ''}</option>)}</Select></Field>
         {(admin || (form.co_known || []).length > 0) && <Field label="Additional assignees" hint={admin ? 'Add as many people as needed — each is notified' : 'Set by an Admin'} className="span-2"><PeoplePicker disabled={!admin} users={assignableUsers} known={form.co_known || []} exclude={form.assigned_to} value={(form.co_assignee_ids || []).filter(x => String(x) !== String(form.assigned_to))} onChange={v => set('co_assignee_ids', v)} /></Field>}
         <Field label="Due date" required><Input type="date" required value={form.due_date} onChange={e => set('due_date', e.target.value)} /></Field>
+        <Field label="Post overdue date"><Input type="date" value={form.post_overdue_date || ''} onChange={e => set('post_overdue_date', e.target.value)} /></Field>
         <Field label="Priority"><Select value={form.priority} onChange={e => set('priority', e.target.value)}>{PRIORITIES.map(x => <option key={x}>{x}</option>)}</Select></Field>
         {form.id && <Field label="Status"><Select value={form.status} onChange={e => set('status', e.target.value)}>{STATUSES.map(x => <option key={x}>{x}</option>)}</Select></Field>}
         <Field label="Description" className="span-2"><Textarea value={form.description} onChange={e => set('description', e.target.value)} placeholder="What needs to be done" /></Field>
         <Field label="Remarks" className="span-2"><Textarea value={form.remarks} onChange={e => set('remarks', e.target.value)} /></Field>
+        {form.id && admin && <Field label="Reply to remarks" className="span-2" hint="Saved replies are shown to the assignee"><Textarea value={form.admin_reply || ''} onChange={e => set('admin_reply', e.target.value)} placeholder="Add a reply for the assignee…" /></Field>}
+        {form.id && !admin && form.admin_reply && <Field label="Admin reply" className="span-2"><Textarea readOnly value={form.admin_reply} /></Field>}
       </div>
       <div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setForm(null)}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? 'Saving…' : form.id ? 'Save changes' : 'Create action'}</Button></div>
     </form>}</Modal>
@@ -167,6 +217,7 @@ function GenericActions({ onToast, filter, assignableUsers, createSignal }) {
       </div>
       {viewing.description && <p><span>Description</span>{viewing.description}</p>}
       {viewing.remarks && <p><span>Remarks</span>{viewing.remarks}</p>}
+      {viewing.admin_reply && <p className="admin-reply-block"><span>Admin reply</span>{viewing.admin_reply}</p>}
       <div className="modal-actions">{viewing.can_edit && <Button variant="ghost" onClick={() => { const v = viewing; setViewing(null); openEdit(v) }}>Edit</Button>}<Button onClick={() => setViewing(null)}>Close</Button></div>
     </div>}</Modal>
   </>
@@ -182,10 +233,10 @@ export default function ActionsPage({ onToast }) {
     <SectionHeader eyebrow="Execution discipline" title="Actions" text={tab === 'generic' ? 'Track work that is not tied to a prospect, like PPT and summit preparation.' : 'Turn every meeting commitment into a visible owner, due date and outcome.'} actions={<>
       <div className="segmented" role="tablist"><button role="tab" aria-selected={tab === 'prospect'} className={tab === 'prospect' ? 'active' : ''} onClick={() => pick('prospect')}>Prospect actions</button><button role="tab" aria-selected={tab === 'generic'} className={tab === 'generic' ? 'active' : ''} onClick={() => pick('generic')}>Generic actions</button></div>
       <FilterSelect value={filter} onChange={setFilter} />
-      {tab === 'generic' && has('ACTION_EDIT') && <Button icon="plus" onClick={() => setCreateSignal(n => n + 1)}>New action</Button>}
+      {has('ACTION_EDIT') && <Button icon="plus" onClick={() => setCreateSignal(n => n + 1)}>New action</Button>}
     </>} />
     {tab === 'generic'
       ? <GenericActions onToast={onToast} filter={filter} assignableUsers={assignableUsers} createSignal={createSignal} />
-      : <ProspectActions onToast={onToast} filter={filter} assignableUsers={assignableUsers} />}
+      : <ProspectActions onToast={onToast} filter={filter} assignableUsers={assignableUsers} createSignal={createSignal} />}
   </>
 }

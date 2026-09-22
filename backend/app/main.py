@@ -5,6 +5,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import struct
 import time
@@ -19,7 +20,7 @@ from typing import Any
 import jwt
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +49,7 @@ from app.db import (
     partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
     partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
     vendor_targets, VENDOR_REGISTRATION_STATUSES, record_people,
+    rfps, rfp_documents, RFP_STATUSES, RFP_QA_STATUSES, RFP_DOCUMENT_CATEGORIES,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -67,6 +69,10 @@ MICROSOFT_SCOPES=os.getenv("MICROSOFT_SCOPES", "openid profile offline_access Us
 INTEGRATION_ENCRYPTION_KEY=os.getenv("INTEGRATION_ENCRYPTION_KEY", "")
 METRICS_TOKEN=os.getenv("METRICS_TOKEN", "")
 OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+# Only this login may retrieve (preview or download) uploaded RFP documents; every other user can see
+# that a document exists but cannot pull its bytes. Configurable for hand-over without a code change.
+RFP_DOWNLOAD_EMAIL=os.getenv("RFP_DOWNLOAD_EMAIL", "rreddy@jsanconsulting.com").strip().lower()
+RFP_DOCUMENTS_PER_RFP=10
 
 @asynccontextmanager
 async def lifespan(app):
@@ -1055,6 +1061,49 @@ def _validate_docx(filename:str,data:bytes):
     except HTTPException: raise
     except Exception: raise HTTPException(400,"This file is not a valid Word .docx document")
 
+# RFP documents accept a broader set of common business file types (unlike MoM attachments, which
+# stay .docx-only). Zip-based office formats get the same zip-signature/macro checks as .docx;
+# other types get a light signature check where one exists. Deliberately excludes HTML/SVG/script/
+# executable types so an "inline" preview response can never execute attacker content.
+RFP_ALLOWED_EXTENSIONS = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".rtf": "application/rtf",
+    ".zip": "application/zip",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".msg": "application/vnd.ms-outlook",
+}
+
+def _validate_rfp_file(filename: str, data: bytes) -> str:
+    if not data: raise HTTPException(400, "The file is empty")
+    if len(data) > MOM_ATTACHMENT_MAX_BYTES: raise HTTPException(413, "The file is larger than 10 MB")
+    ext = os.path.splitext(filename.lower())[1]
+    if ext not in RFP_ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"'{ext or 'this file type'}' is not supported. Allowed types: " + ", ".join(sorted(e.lstrip('.') for e in RFP_ALLOWED_EXTENSIONS)))
+    if ext in (".docx", ".xlsx", ".pptx", ".zip"):
+        if not data.startswith(b"PK\x03\x04"): raise HTTPException(400, "This file is not a valid document")
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                infos = z.infolist()
+                if sum(i.file_size for i in infos) > MOM_ATTACHMENT_MAX_UNZIPPED: raise HTTPException(400, "The document is too large once opened")
+                if any(i.filename.lower().endswith("vbaproject.bin") for i in infos): raise HTTPException(400, "Macro-enabled documents are not allowed")
+        except HTTPException: raise
+        except Exception: raise HTTPException(400, "This file is not a valid document")
+    elif ext == ".pdf":
+        if not data.startswith(b"%PDF-"): raise HTTPException(400, "This file is not a valid PDF")
+    return RFP_ALLOWED_EXTENSIONS[ext]
+
 def _mom_for(u,mom_id:int):
     m=row(select(moms.c.id,moms.c.lead_id).where(moms.c.id==mom_id))
     if not m or not can_view_lead(u,m["lead_id"]): raise HTTPException(404,"Minutes of Meeting not found")
@@ -1127,7 +1176,8 @@ def add_action(lead_id:int,p:Payload,u=Depends(require_csrf)):
     if not d.get("description") or not d.get("due_date"): raise HTTPException(400,"Action description and due date are required")
     co_ids=[i for i in parse_person_ids(d.get("co_assignee_ids"),"Additional assignees") if i!=assigned]
     if co_ids: plan_people(u,"action",None,assigned,co_ids,"assignees")
-    aid=execute(insert(actions).values(lead_id=lead_id,opportunity_id=d.get("opportunity_id") or None,action_date=d.get("action_date") or today_str(),description=d["description"],assigned_to=assigned,due_date=d["due_date"],status=d.get("status") or "Open",priority=d.get("priority") or "Medium",remarks=d.get("remarks"),created_by=u["id"]))
+    pod=_optional_date(d.get("post_overdue_date"),"Post overdue date")
+    aid=execute(insert(actions).values(lead_id=lead_id,opportunity_id=d.get("opportunity_id") or None,action_date=d.get("action_date") or today_str(),description=d["description"],assigned_to=assigned,due_date=d["due_date"],status=d.get("status") or "Open",priority=d.get("priority") or "Medium",remarks=d.get("remarks"),post_overdue_date=pod,created_by=u["id"]))
     if co_ids: apply_people(u,"action",aid,co_ids,[])
     notify_assigned([assigned]+co_ids,"New action assigned",d["description"],"action",aid,d["due_date"]); audit(u["id"],"action",aid,"CREATE",d)
     return attach_people([row(select(actions).where(actions.c.id==aid))],"action","co_assignees")[0]
@@ -1139,6 +1189,9 @@ def update_action(action_id:int,p:Payload,u=Depends(require_csrf)):
     a["co_assignees"]=people_map("action",[action_id]).get(action_id,[])
     if "ACTION_EDIT" not in u["permissions"] or (not is_assignee(a,u["id"]) and not can_edit_lead(u,a["lead_id"])): raise HTTPException(403,"You cannot update this action")
     d=p.data; vals={k:d[k] for k in ("description","assigned_to","due_date","status","priority","remarks","completion_date") if k in d}
+    if "post_overdue_date" in d: vals["post_overdue_date"]=_optional_date(d.get("post_overdue_date"),"Post overdue date")
+    # Only an Admin/Super Admin may post the reply that is shown back to the assignee
+    if "admin_reply" in d and u["role"] in ("Super Admin","Admin"): vals["admin_reply"]=(str(d["admin_reply"]).strip() or None) if d["admin_reply"] is not None else None
     if d.get("status")=="Completed" and not d.get("completion_date"): vals["completion_date"]=today_str()
     added=removed=[]
     if "co_assignee_ids" in d:
@@ -1167,6 +1220,13 @@ ACTION_PRIORITIES=("Low","Medium","High","Critical")
 def _valid_date(v):
     try: return datetime.strptime(str(v),"%Y-%m-%d").strftime("%Y-%m-%d")
     except Exception: return None
+
+def _optional_date(v,label):
+    """Validate an optional YYYY-MM-DD date; blank/None clears it."""
+    if v is None or str(v).strip()=="": return None
+    d=_valid_date(v)
+    if not d: raise HTTPException(400,f"{label} must be a valid YYYY-MM-DD date")
+    return d
 
 def generic_action_access(u,a):
     """Same hierarchy rule as prospect actions: your own, ones you created, and your reporting team's."""
@@ -1231,6 +1291,7 @@ def _generic_action_values(d,partial:bool):
         vals["status"]=d.get("status") or "Open"
     for k in ("description","remarks"):
         if k in d: vals[k]=(str(d[k]).strip() or None) if d[k] is not None else None
+    if "post_overdue_date" in d: vals["post_overdue_date"]=_optional_date(d.get("post_overdue_date"),"Post overdue date")
     return vals
 
 @app.post("/api/generic-actions")
@@ -1257,6 +1318,8 @@ def update_generic_action(action_id:int,p:Payload,u=Depends(require_csrf)):
     if not visible: raise HTTPException(404,"Action not found")
     if not can_edit: raise HTTPException(403,"You cannot update this action")
     d=p.data; vals=_generic_action_values(d,partial=True)
+    # Only an Admin/Super Admin may post the reply that is shown back to the assignee
+    if "admin_reply" in d and u["role"] in ("Super Admin","Admin"): vals["admin_reply"]=(str(d["admin_reply"]).strip() or None) if d["admin_reply"] is not None else None
     if d.get("assigned_to") and int(d["assigned_to"])!=a["assigned_to"]:
         assigned=int(d["assigned_to"])
         if not can_assign(u,assigned): raise HTTPException(403,"You cannot assign this action to that user")
@@ -2944,6 +3007,155 @@ def delete_vendor_target(target_id: int, u=Depends(require_csrf)):
     if not t: raise HTTPException(404, "Target not found")
     execute(delete(vendor_targets).where(vendor_targets.c.id == target_id))
     audit(u["id"], "vendor_target", target_id, "DELETE", {"company_name": t["company_name"]})
+    return {"ok": True}
+
+# ── RFP (tender) tracking ───────────────────────────────────────────────────────────────────────
+# Additive feature on its own two tables (rfps, rfp_documents). Viewing follows COMPANY_VIEW and
+# editing COMPANY_EDIT, exactly like the Supplier Network; no existing table, route or rule changes.
+# Every COMPANY_VIEW login can preview an uploaded document in-page; only RFP_DOWNLOAD_EMAIL gets
+# the explicit Download action (the "can_download" flag drives that in the UI).
+def _rfp_can_download(u) -> bool:
+    return (u.get("email") or "").strip().lower() == RFP_DOWNLOAD_EMAIL
+
+def _rfp_document_category(value) -> str:
+    c = (value or "general").strip().lower()
+    if c not in RFP_DOCUMENT_CATEGORIES: raise HTTPException(400, "Invalid document category")
+    return c
+
+def _rfp_or_404(rfp_id: int):
+    r = row(select(rfps.c.id, rfps.c.name).where(rfps.c.id == rfp_id))
+    if not r: raise HTTPException(404, "RFP not found")
+    return r
+
+def _clean_rfp_date(v, label):
+    t = _clean_text(v, 10)
+    if t and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", t): raise HTTPException(400, f"{label} must be a date in YYYY-MM-DD format")
+    return t
+
+def _rfp_status(value, label):
+    s = value or "Initiated"
+    if s not in RFP_STATUSES: raise HTTPException(400, f"Invalid {label}")
+    return s
+
+def _rfp_qa_status(value):
+    s = value or "Not started"
+    if s not in RFP_QA_STATUSES: raise HTTPException(400, "Invalid Q&A status")
+    return s
+
+def _rfp_documents(rfp_id: int, u):
+    out = []
+    for d in rows(select(rfp_documents.c.id, rfp_documents.c.filename, rfp_documents.c.size_bytes, rfp_documents.c.category, rfp_documents.c.content_type,
+                         rfp_documents.c.created_at, rfp_documents.c.uploaded_by, users.c.name.label("uploaded_by_name"))
+                  .select_from(rfp_documents.outerjoin(users, users.c.id == rfp_documents.c.uploaded_by))
+                  .where(rfp_documents.c.rfp_id == rfp_id).order_by(rfp_documents.c.id)):
+        d["can_delete"] = (d["uploaded_by"] == u["id"]) or is_admin_role(u)
+        out.append(d)
+    return out
+
+@app.get("/api/rfps")
+def list_rfps(u=Depends(require_perm("COMPANY_VIEW"))):
+    items = rows(select(rfps, users.c.name.label("created_by_name"))
+                 .select_from(rfps.outerjoin(users, users.c.id == rfps.c.created_by))
+                 .order_by(rfps.c.id.desc()))
+    ids = [it["id"] for it in items]
+    docs_by_rfp = defaultdict(list)
+    if ids:
+        for d in rows(select(rfp_documents.c.id, rfp_documents.c.rfp_id, rfp_documents.c.filename, rfp_documents.c.size_bytes, rfp_documents.c.category, rfp_documents.c.content_type,
+                             rfp_documents.c.created_at, rfp_documents.c.uploaded_by, users.c.name.label("uploaded_by_name"))
+                      .select_from(rfp_documents.outerjoin(users, users.c.id == rfp_documents.c.uploaded_by))
+                      .where(rfp_documents.c.rfp_id.in_(ids)).order_by(rfp_documents.c.id)):
+            d["can_delete"] = (d["uploaded_by"] == u["id"]) or is_admin_role(u)
+            docs_by_rfp[d["rfp_id"]].append(d)
+    for it in items:
+        it["documents"] = docs_by_rfp.get(it["id"], [])
+        it["document_count"] = len(it["documents"])
+    return {"items": items, "statuses": RFP_STATUSES, "qa_statuses": RFP_QA_STATUSES, "can_download": _rfp_can_download(u)}
+
+@app.post("/api/rfps")
+def create_rfp(p: Payload, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    d = p.data
+    name = _clean_text(d.get("name"), 220)
+    if not name: raise HTTPException(400, "RFP name is required")
+    rid = execute(insert(rfps).values(
+        name=name, description=_clean_text(d.get("description")),
+        rfp_date=_clean_rfp_date(d.get("rfp_date"), "Date of RFP"), submission_eta=_clean_rfp_date(d.get("submission_eta"), "Submission ETA"),
+        qa_timeline=_clean_text(d.get("qa_timeline")), qa_status=_rfp_qa_status(d.get("qa_status")),
+        technical_response=_clean_text(d.get("technical_response")), pricing=_clean_text(d.get("pricing")),
+        jsan_status=_rfp_status(d.get("jsan_status"), "JSAN participation status"), vendor_status=_rfp_status(d.get("vendor_status"), "vendor participation status"),
+        created_by=u["id"]))
+    audit(u["id"], "rfp", rid, "CREATE", d)
+    return row(select(rfps).where(rfps.c.id == rid))
+
+@app.put("/api/rfps/{rfp_id}")
+def update_rfp(rfp_id: int, p: Payload, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    _rfp_or_404(rfp_id)
+    d = p.data
+    vals = {k: d[k] for k in ("name", "description", "rfp_date", "submission_eta", "qa_timeline", "qa_status", "technical_response", "pricing", "jsan_status", "vendor_status") if k in d}
+    if "name" in vals:
+        vals["name"] = _clean_text(vals["name"], 220)
+        if not vals["name"]: raise HTTPException(400, "RFP name is required")
+    for k in ("description", "qa_timeline", "technical_response", "pricing"):
+        if k in vals: vals[k] = _clean_text(vals[k])
+    if "rfp_date" in vals: vals["rfp_date"] = _clean_rfp_date(vals["rfp_date"], "Date of RFP")
+    if "submission_eta" in vals: vals["submission_eta"] = _clean_rfp_date(vals["submission_eta"], "Submission ETA")
+    if "qa_status" in vals: vals["qa_status"] = _rfp_qa_status(vals["qa_status"])
+    if "jsan_status" in vals: vals["jsan_status"] = _rfp_status(vals["jsan_status"], "JSAN participation status")
+    if "vendor_status" in vals: vals["vendor_status"] = _rfp_status(vals["vendor_status"], "vendor participation status")
+    vals["updated_at"] = utcnow()
+    execute(update(rfps).where(rfps.c.id == rfp_id).values(**vals))
+    audit(u["id"], "rfp", rfp_id, "UPDATE", d)
+    return row(select(rfps).where(rfps.c.id == rfp_id))
+
+@app.delete("/api/rfps/{rfp_id}")
+def delete_rfp(rfp_id: int, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    r = _rfp_or_404(rfp_id)
+    execute(delete(rfp_documents).where(rfp_documents.c.rfp_id == rfp_id))  # explicit: SQLite does not enforce ON DELETE CASCADE by default
+    execute(delete(rfps).where(rfps.c.id == rfp_id))
+    audit(u["id"], "rfp", rfp_id, "DELETE", {"name": r["name"]})
+    return {"ok": True}
+
+@app.post("/api/rfps/{rfp_id}/attachments")
+def upload_rfp_document(rfp_id: int, file: UploadFile = File(...), category: str = Form("general"), u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    _rfp_or_404(rfp_id)
+    cat = _rfp_document_category(category)
+    count = (row(select(func.count().label("n")).select_from(rfp_documents).where(rfp_documents.c.rfp_id == rfp_id)) or {}).get("n", 0)
+    if count >= RFP_DOCUMENTS_PER_RFP: raise HTTPException(400, f"An RFP can have at most {RFP_DOCUMENTS_PER_RFP} documents")
+    data = file.file.read(MOM_ATTACHMENT_MAX_BYTES + 1)
+    filename = _clean_filename(file.filename)
+    content_type = _validate_rfp_file(filename, data)
+    digest = hashlib.sha256(data).hexdigest()
+    did = execute(insert(rfp_documents).values(rfp_id=rfp_id, filename=filename, content_type=content_type, size_bytes=len(data), sha256=digest, data=data, category=cat, uploaded_by=u["id"]))
+    audit(u["id"], "rfp_document", did, "CREATE", {"rfp_id": rfp_id, "filename": filename, "size_bytes": len(data), "sha256": digest, "category": cat})
+    return {"id": did, "rfp_id": rfp_id, "filename": filename, "size_bytes": len(data), "category": cat, "uploaded_by": u["id"], "uploaded_by_name": u["name"], "can_delete": True}
+
+@app.get("/api/rfps/{rfp_id}/attachments/{doc_id}")
+def view_rfp_document(rfp_id: int, doc_id: int, u=Depends(require_perm("COMPANY_VIEW"))):
+    # Every viewer may open the in-page preview; the actual save-to-disk affordance in the UI is
+    # shown only to the authorised custodian (u["can_download"]/can_download on the list response).
+    _rfp_or_404(rfp_id)
+    a = row(select(rfp_documents).where(and_(rfp_documents.c.id == doc_id, rfp_documents.c.rfp_id == rfp_id)))
+    if not a: raise HTTPException(404, "Document not found")
+    from urllib.parse import quote
+    ascii_name = "".join(ch if ch.isascii() and ch.isprintable() and ch not in '"\\;' else "_" for ch in a["filename"])
+    disposition = "attachment" if _rfp_can_download(u) else "inline"
+    audit(u["id"], "rfp_document", doc_id, "DOWNLOAD" if _rfp_can_download(u) else "VIEW", {"rfp_id": rfp_id, "filename": a["filename"]})
+    return Response(content=bytes(a["data"]), media_type=a["content_type"] or DOCX_MIME, headers={
+        "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(a['filename'])}",
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+@app.delete("/api/rfps/{rfp_id}/attachments/{doc_id}")
+def delete_rfp_document(rfp_id: int, doc_id: int, u=Depends(require_csrf)):
+    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
+    _rfp_or_404(rfp_id)
+    a = row(select(rfp_documents.c.id, rfp_documents.c.filename, rfp_documents.c.uploaded_by).where(and_(rfp_documents.c.id == doc_id, rfp_documents.c.rfp_id == rfp_id)))
+    if not a: raise HTTPException(404, "Document not found")
+    if a["uploaded_by"] != u["id"] and not is_admin_role(u): raise HTTPException(403, "Only the uploader, Super Admin or Admin can remove this file")
+    execute(delete(rfp_documents).where(rfp_documents.c.id == doc_id))
+    audit(u["id"], "rfp_document", doc_id, "DELETE", {"rfp_id": rfp_id, "filename": a["filename"]})
     return {"ok": True}
 
 # Static no-build PWA UI. API routes are registered first, so /api remains authoritative.

@@ -24,11 +24,12 @@ export function checkDocxFiles(files,existingCount=0){
  return {ok,errors}
 }
 
-// Uploads one by one so a single bad file does not block the rest.
-export async function uploadMomFiles(momId,files,base='/api/moms'){
+// Uploads one by one so a single bad file does not block the rest. `extra` adds fixed form
+// fields to every upload (e.g. {category:'description'} for RFP sub-tab documents).
+export async function uploadMomFiles(momId,files,base='/api/moms',extra={}){
  const uploaded=[],failed=[]
  for(const f of files){
-  const form=new FormData();form.append('file',f)
+  const form=new FormData();form.append('file',f);Object.entries(extra).forEach(([k,v])=>form.append(k,v))
   try{uploaded.push(await api.raw(`${base}/${momId}/attachments`,{method:'POST',body:form}))}
   catch(e){failed.push(`${f.name}: ${e.message}`)}
  }
@@ -47,11 +48,14 @@ export function DocxPicker({files,onChange,onError}){
  </div>
 }
 
+// Generic file fetch (despite the name, not docx-specific) — used for both the docx viewer and,
+// via fetchAttachmentBlob, any other file-type preview.
 async function fetchDocx(momId,attId,base='/api/moms'){
  const r=await fetch(fileUrl(momId,attId,base),{credentials:'include'})
  if(!r.ok){let msg=`Could not open the file (${r.status})`;try{msg=(await r.json()).detail||msg}catch{};throw new Error(msg)}
  return r.blob()
 }
+export const fetchAttachmentBlob=fetchDocx
 
 export async function downloadAttachment(momId,att,base='/api/moms'){
  const blob=await fetchDocx(momId,att.id,base)
@@ -61,7 +65,7 @@ export async function downloadAttachment(momId,att,base='/api/moms'){
 }
 
 // Renders the Word document in the page. Embedded HTML chunks are not rendered and links are limited to safe schemes.
-export function DocxViewer({momId,attachment,onClose,onToast,base='/api/moms'}){
+export function DocxViewer({momId,attachment,onClose,onToast,base='/api/moms',canDownload=true}){
  const bodyRef=useRef(null); const styleRef=useRef(null)
  const [state,setState]=useState('loading'); const [error,setError]=useState('')
  useEffect(()=>{
@@ -86,7 +90,7 @@ export function DocxViewer({momId,attachment,onClose,onToast,base='/api/moms'}){
  },[momId,attachment?.id])
  const download=async()=>{try{await downloadAttachment(momId,attachment,base)}catch(e){onToast?.({type:'error',message:e.message})}}
  return <Modal open={!!attachment} onClose={onClose} title={attachment?.filename} eyebrow="Minutes of Meeting document" size="xl">
-  <div className="docx-viewer-bar"><span>{attachment&&formatBytes(attachment.size_bytes)}{attachment?.uploaded_by_name?` · uploaded by ${attachment.uploaded_by_name}`:''}</span><Button variant="soft" icon="download" onClick={download}>Download</Button></div>
+  <div className="docx-viewer-bar"><span>{attachment&&formatBytes(attachment.size_bytes)}{attachment?.uploaded_by_name?` · uploaded by ${attachment.uploaded_by_name}`:''}</span>{canDownload&&<Button type="button" variant="soft" icon="download" onClick={download}>Download</Button>}</div>
   {state==='loading'&&<Spinner label="Opening document"/>}
   {state==='error'&&<div className="error-banner"><div><strong>Preview unavailable</strong><span>{error}. You can still download the file.</span></div></div>}
   <div ref={styleRef}/>

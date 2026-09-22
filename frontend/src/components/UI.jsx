@@ -21,7 +21,7 @@ export function KpiCard({ label, value, helper, icon = 'forecast', tone = 'blue'
 export function Modal({ open, onClose, title, eyebrow, children, size = 'md' }) {
   useEffect(() => { if (!open) return; const fn=e=>e.key==='Escape'&&onClose(); window.addEventListener('keydown',fn); return()=>window.removeEventListener('keydown',fn) }, [open,onClose])
   if (!open) return null
-  return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><section className={`modal modal-${size}`} role="dialog" aria-modal="true"><header><div>{eyebrow&&<span className="eyebrow">{eyebrow}</span>}<h2>{title}</h2></div><button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="close"/></button></header><div className="modal-body">{children}</div></section></div>
+  return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><section className={`modal modal-${size}`} role="dialog" aria-modal="true"><header><div>{eyebrow&&<span className="eyebrow">{eyebrow}</span>}<h2>{title}</h2></div><button type="button" className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="close"/></button></header><div className="modal-body">{children}</div></section></div>
 }
 export function Field({ label, hint, children, required, className = '' }) { return <label className={classNames('field', className)}><span>{label}{required&&<em>*</em>}</span>{children}{hint&&<small>{hint}</small>}</label> }
 export function Input(props) { return <input className="input" {...props}/> }

@@ -11,6 +11,7 @@ const Lead360Page=lazy(()=>import('./pages/Lead360Page'))
 const PartnershipsPage=lazy(()=>import('./pages/PartnershipsPage'))
 const Partnership360Page=lazy(()=>import('./pages/Partnership360Page'))
 const SupplierNetworkPage=lazy(()=>import('./pages/SupplierNetworkPage'))
+const RfpsPage=lazy(()=>import('./pages/RfpsPage'))
 const ActionsPage=lazy(()=>import('./pages/ActionsPage'))
 const PipelinePage=lazy(()=>import('./pages/PipelinePage'))
 const ForecastPage=lazy(()=>import('./pages/ForecastPage'))
@@ -18,7 +19,7 @@ const LeadershipPage=lazy(()=>import('./pages/LeadershipPage'))
 const AdminPage=lazy(()=>import('./pages/AdminPage'))
 const KPIPage=lazy(()=>import('./pages/KPIPage'))
 // Pages whose data needs a role permission; without it the page explains instead of failing.
-const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/supplier-network','COMPANY_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
+const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/supplier-network','COMPANY_VIEW'],['/rfps','COMPANY_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
 
 // Keeps a crash in one page from blanking the whole app; remounts (and so resets) on navigation.
 class PageBoundary extends React.Component{
@@ -28,9 +29,18 @@ class PageBoundary extends React.Component{
  render(){if(!this.state.error)return this.props.children;return <div className="empty-state"><strong>This page ran into a problem</strong><span>{String(this.state.error?.message||this.state.error)}</span><button className="btn btn-primary" onClick={()=>window.location.reload()}><span>Reload</span></button></div>}
 }
 
+// Kalpesh Mehta's login is restricted to Supplier Network only; enforced here too so a direct
+// hash/URL visit or the global search can't reach other pages. Client-side only, per request.
+const SUPPLIER_NETWORK_ONLY_EMAILS=['kmehta@jsanconsulting.com']
+// RFPs workspace is restricted to Chandrika's and Kamalakar's logins; a direct hash/URL visit is blocked for everyone
+// else so the tab is genuinely hidden, not just removed from the nav. Client-side only, per request.
+const RFP_EMAILS=['chandrika@jsan.local','kdasari@jsanconsulting.com']
+
 function Product(){
  const {user,loading,has}=useAuth(); const route=useHashRoute(); const [toast,setToast]=useState(null)
- useEffect(()=>{if(user&&route.path==='/')navigate('dashboard')},[user,route.path])
+ const restrictedToSupplierNetwork=SUPPLIER_NETWORK_ONLY_EMAILS.includes((user?.email||'').trim().toLowerCase())
+ useEffect(()=>{if(user&&route.path==='/')navigate(restrictedToSupplierNetwork?'supplier-network':'dashboard')},[user,route.path,restrictedToSupplierNetwork])
+ useEffect(()=>{if(user&&restrictedToSupplierNetwork&&route.path!=='/supplier-network')navigate('supplier-network')},[user,restrictedToSupplierNetwork,route.path])
  useEffect(()=>{const key=e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();document.querySelector('.command-search')?.click()}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[])
  if(loading)return <div className="boot-screen"><img src="/jsan-logo.jpg"/><Spinner label="Opening PursuitNova"/></div>
  if(!user)return <LoginPage/>
@@ -41,6 +51,7 @@ function Product(){
  else if(route.path==='/partnerships')page=<PartnershipsPage route={route} onToast={setToast}/>
  else if(route.path.startsWith('/partnership/'))page=<Partnership360Page id={Number(route.path.split('/')[2])} onToast={setToast}/>
  else if(route.path==='/supplier-network')page=<SupplierNetworkPage onToast={setToast}/>
+ else if(route.path==='/rfps')page=<RfpsPage onToast={setToast}/>
  else if(route.path==='/actions')page=<ActionsPage onToast={setToast}/>
  else if(route.path==='/pipeline')page=<PipelinePage route={route} onToast={setToast}/>
  else if(route.path==='/forecast')page=<ForecastPage onToast={setToast}/>
@@ -50,6 +61,7 @@ function Product(){
  else page=<DashboardPage/>
  const need=PAGE_PERMS.find(([prefix])=>route.path.startsWith(prefix))?.[1]
  if(need&&!has(need))page=<Empty title="Not available for your role" text="Your role does not include access to this page. Ask your admin to add it to your role."/>
+ if(route.path==='/rfps'&&!RFP_EMAILS.includes((user?.email||'').trim().toLowerCase()))page=<Empty title="Not available" text="The RFPs workspace is restricted to specific logins."/>
  return <><AppShell route={route}><PageBoundary key={route.path}><Suspense fallback={<Spinner label="Loading workspace"/>}>{page}</Suspense></PageBoundary></AppShell><Toast toast={toast} onClose={()=>setToast(null)}/></>
 }
 export default function App(){return <AuthProvider><Product/></AuthProvider>}

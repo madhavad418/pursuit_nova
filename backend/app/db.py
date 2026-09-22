@@ -177,6 +177,8 @@ actions = Table(
     Column("priority", String(20), nullable=False, default="Medium"),
     Column("remarks", Text),
     Column("completion_date", String(10)),
+    Column("post_overdue_date", String(10)),
+    Column("admin_reply", Text),
     Column("created_by", ForeignKey("users.id"), nullable=False),
     Column("created_at", DateTime, server_default=func.current_timestamp()),
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
@@ -417,6 +419,8 @@ generic_actions = Table(
     Column("priority", String(20), nullable=False, default="Medium"),
     Column("remarks", Text),
     Column("completion_date", String(10)),
+    Column("post_overdue_date", String(10)),
+    Column("admin_reply", Text),
     Column("created_by", ForeignKey("users.id"), nullable=False),
     Column("created_at", DateTime, server_default=func.current_timestamp()),
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
@@ -656,6 +660,47 @@ vendor_targets = Table(
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
 )
 
+# RFP (tender) tracking. Each RFP carries two independent participation tracks that share one status
+# list: JSAN's own bid, and JSAN's bid together with a vendor/subcontractor. Additive: no existing
+# table or column is changed.
+RFP_STATUSES = ["Initiated", "In progress", "Submitted", "Awaited response", "Awarded to JSAN", "Not awarded to JSAN", "Close"]
+RFP_QA_STATUSES = ["Not started", "Questions submitted", "Answers received", "Closed"]
+rfps = Table(
+    "rfps", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(220), nullable=False),
+    Column("description", Text),
+    Column("rfp_date", String(10)),
+    Column("submission_eta", String(10)),
+    Column("qa_timeline", Text),
+    Column("qa_status", String(40), nullable=False, default="Not started"),
+    Column("technical_response", Text),
+    Column("pricing", Text),
+    Column("jsan_status", String(40), nullable=False, default="Initiated"),
+    Column("vendor_status", String(40), nullable=False, default="Initiated"),
+    Column("created_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, server_default=func.current_timestamp()),
+)
+# Uploaded RFP documents. Every login with COMPANY_VIEW can preview a document in-page; only the
+# authorised custodian (RFP_DOWNLOAD_EMAIL) gets the Download action. `category` tags which sub-tab
+# a document belongs to: the general Documents tab, or the Description / Technical response tabs.
+RFP_DOCUMENT_CATEGORIES = ["general", "description", "technical_response"]
+rfp_documents = Table(
+    "rfp_documents", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("rfp_id", ForeignKey("rfps.id", ondelete="CASCADE"), nullable=False),
+    Column("filename", String(255), nullable=False),
+    Column("content_type", String(120), nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("data", LargeBinary, nullable=False),
+    Column("category", String(30), nullable=False, default="general"),
+    Column("uploaded_by", ForeignKey("users.id"), nullable=False),
+    Column("created_at", DateTime, server_default=func.current_timestamp()),
+)
+Index("ix_rfp_documents_rfp_id", rfp_documents.c.rfp_id)
+
 # Extra people on a prospect ("co-owners") or an action ("co-assignees"), beyond its primary owner_id / assigned_to.
 # Additive: existing rows and columns are untouched; a record with no rows here behaves exactly as before.
 # entity_type is "lead", "action" or "generic_action".
@@ -838,7 +883,7 @@ def _add_missing_columns():
     for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
                 partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
                 partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
-                vendor_targets, record_people):
+                vendor_targets, record_people, rfps, rfp_documents):
         tbl.create(engine, checkfirst=True)
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
@@ -846,6 +891,20 @@ def _add_missing_columns():
     if "category" not in {c["name"] for c in inspect(engine).get_columns("users")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE users ADD COLUMN category VARCHAR(80)"))
+    # Optional "post overdue date" added after the actions boards shipped; nullable, so existing rows are untouched
+    for tbl_name in ("actions", "generic_actions"):
+        if "post_overdue_date" not in {c["name"] for c in inspect(engine).get_columns(tbl_name)}:
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE {tbl_name} ADD COLUMN post_overdue_date VARCHAR(10)"))
+    # Admin's reply to an action's remarks; nullable and additive, so existing rows are untouched
+    for tbl_name in ("actions", "generic_actions"):
+        if "admin_reply" not in {c["name"] for c in inspect(engine).get_columns(tbl_name)}:
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE {tbl_name} ADD COLUMN admin_reply TEXT"))
+    # Category tags which RFP sub-tab a document belongs to; existing documents default to "general"
+    if "category" not in {c["name"] for c in inspect(engine).get_columns("rfp_documents")}:
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE rfp_documents ADD COLUMN category VARCHAR(30) NOT NULL DEFAULT 'general'"))
     # Vertical is free text of any length (widening a column keeps every existing value as it is)
     vcol = next(c for c in inspect(engine).get_columns("companies") if c["name"] == "vertical")
     if engine.dialect.name == "postgresql" and getattr(vcol["type"], "length", None):

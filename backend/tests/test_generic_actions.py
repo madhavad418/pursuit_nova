@@ -92,3 +92,91 @@ def test_generic_action_validation_and_csrf(client, login, csrf_headers):
     # Mutations need the CSRF header
     assert client.post('/api/generic-actions', json={'data': {'title': 'Deck', 'due_date': TOMORROW}}).status_code == 403
     assert client.delete(f"/api/generic-actions/{r.json()['id']}", headers=h).status_code == 200
+
+
+def test_post_overdue_date_on_generic_and_prospect_actions(client, login, csrf_headers):
+    ext = (date.today() + timedelta(days=5)).isoformat()
+    _as(client, login, EXEC1)
+    h = csrf_headers(client)
+
+    # Generic action: stored on create, returned in the row and the list
+    r = client.post('/api/generic-actions', json={'data': {'title': 'Reschedule deck', 'action_type': 'Presentation / PPT', 'due_date': YESTERDAY, 'post_overdue_date': ext}}, headers=h)
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert g['post_overdue_date'] == ext
+    assert _ids(client)[g['id']]['post_overdue_date'] == ext
+
+    # Update it, then clear it with a blank value
+    assert client.put(f"/api/generic-actions/{g['id']}", json={'data': {'post_overdue_date': TOMORROW}}, headers=h).json()['post_overdue_date'] == TOMORROW
+    assert client.put(f"/api/generic-actions/{g['id']}", json={'data': {'post_overdue_date': ''}}, headers=h).json()['post_overdue_date'] is None
+    # An invalid date is rejected, and omitting the field leaves it untouched
+    assert client.put(f"/api/generic-actions/{g['id']}", json={'data': {'post_overdue_date': '99-99-9999'}}, headers=h).status_code == 400
+    assert client.put(f"/api/generic-actions/{g['id']}", json={'data': {'priority': 'High'}}, headers=h).json()['post_overdue_date'] is None
+    assert client.post('/api/generic-actions', json={'data': {'title': 'Bad', 'action_type': 'Other', 'due_date': TOMORROW, 'post_overdue_date': 'nope'}}, headers=h).status_code == 400
+    assert client.delete(f"/api/generic-actions/{g['id']}", headers=h).status_code == 200
+
+    # Prospect action: created against a visible lead with a post overdue date
+    leads = client.get('/api/leads').json()
+    assert leads, 'expected demo leads'
+    lead = leads[0]
+    r = client.post(f"/api/leads/{lead['id']}/actions", json={'data': {'description': 'Send revised timeline', 'due_date': YESTERDAY, 'post_overdue_date': ext}}, headers=h)
+    assert r.status_code == 200, r.text
+    a = r.json()
+    assert a['post_overdue_date'] == ext
+    listed = {x['id']: x for x in client.get('/api/actions').json()}
+    assert listed[a['id']]['post_overdue_date'] == ext
+    # Update through the prospect action endpoint
+    assert client.put(f"/api/actions/{a['id']}", json={'data': {'post_overdue_date': TOMORROW}}, headers=h).json()['post_overdue_date'] == TOMORROW
+    assert client.put(f"/api/actions/{a['id']}", json={'data': {'post_overdue_date': 'bad'}}, headers=h).status_code == 400
+
+
+def test_admin_reply_on_generic_and_prospect_actions(client, login, csrf_headers):
+    # admin_reply is an admin-authored response to the assignee's remarks; a reply is never authored by the assignee
+    _as(client, login, EXEC1)
+    h = csrf_headers(client)
+
+    # ── Generic action ──
+    r = client.post('/api/generic-actions', json={'data': {'title': 'Pricing deck', 'action_type': 'Presentation / PPT', 'due_date': TOMORROW, 'remarks': 'Which template should I use?'}}, headers=h)
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert not g.get('admin_reply')
+    # The non-admin assignee cannot author a reply (silently ignored, not an error)
+    assert not client.put(f"/api/generic-actions/{g['id']}", json={'data': {'admin_reply': 'self-reply'}}, headers=h).json().get('admin_reply')
+    # A Super Admin adds the reply; it is trimmed and returned in the row and in the list
+    _as(client, login, SUPER)
+    r = client.put(f"/api/generic-actions/{g['id']}", json={'data': {'admin_reply': '  Use the standard pricing template  '}}, headers=csrf_headers(client))
+    assert r.status_code == 200, r.text
+    assert r.json()['admin_reply'] == 'Use the standard pricing template'
+    assert _ids(client)[g['id']]['admin_reply'] == 'Use the standard pricing template'
+    # The assignee now sees the reply on their own action
+    _as(client, login, EXEC1)
+    assert _ids(client)[g['id']]['admin_reply'] == 'Use the standard pricing template'
+    # An admin can clear the reply with a blank value
+    _as(client, login, SUPER)
+    assert client.put(f"/api/generic-actions/{g['id']}", json={'data': {'admin_reply': ''}}, headers=csrf_headers(client)).json()['admin_reply'] is None
+
+    # ── Prospect action ──
+    _as(client, login, EXEC1)
+    h = csrf_headers(client)
+    leads = client.get('/api/leads').json()
+    assert leads, 'expected demo leads'
+    r = client.post(f"/api/leads/{leads[0]['id']}/actions", json={'data': {'description': 'Send revised timeline', 'due_date': TOMORROW, 'remarks': 'Please review'}}, headers=h)
+    assert r.status_code == 200, r.text
+    a = r.json()
+    assert not a.get('admin_reply')
+    # The assignee (non-admin) cannot author a reply even though they can edit their own action
+    assert not client.put(f"/api/actions/{a['id']}", json={'data': {'admin_reply': 'nope'}}, headers=h).json().get('admin_reply')
+    # A Super Admin replies; it flows out on the row and in the list the assignee sees
+    _as(client, login, SUPER)
+    r = client.put(f"/api/actions/{a['id']}", json={'data': {'admin_reply': ' Looks good, send it '}}, headers=csrf_headers(client))
+    assert r.status_code == 200, r.text
+    assert r.json()['admin_reply'] == 'Looks good, send it'
+    assert {x['id']: x for x in client.get('/api/actions').json()}[a['id']]['admin_reply'] == 'Looks good, send it'
+    _as(client, login, EXEC1)
+    assert {x['id']: x for x in client.get('/api/actions').json()}[a['id']]['admin_reply'] == 'Looks good, send it'
+
+    # Clean up both actions so the shared test database stays tidy
+    _as(client, login, SUPER)
+    hc = csrf_headers(client)
+    assert client.delete(f"/api/generic-actions/{g['id']}", headers=hc).status_code == 200
+    assert client.delete(f"/api/actions/{a['id']}", headers=hc).status_code == 200
