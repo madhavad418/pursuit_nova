@@ -22,6 +22,9 @@ const DOC_TABS=['Description','Technical response']
 // JSAN's reference technical response with every answer removed, shipped from frontend/public/templates
 // (regenerate it with scripts/make_technical_response_template.py).
 const TEMPLATE_FILE = '/templates/JSAN_Technical_Response_Template.docx'
+// Pricing workbooks, also shipped from frontend/public/templates.
+const PRICING_TEMPLATE_FULL = '/templates/JSAN_Pricing_Templates_GIS_Telecom_v1.xlsx'
+const PRICING_TEMPLATE_GIS = '/templates/JSAN_GIS_Navigation_Pricing_Templates_v2.xlsx'
 
 function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,docsProps}){
  return <>
@@ -48,6 +51,11 @@ function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,doc
   </div>}
   {tab==='Technical response'&&docsProps&&<RfpDocuments {...docsProps} category="technical_response"/>}
   {tab==='Pricing'&&<div className="form-grid">
+   <div className="template-bar span-2">
+    <div className="template-bar-copy"><strong>Pricing</strong><span>Download the JSAN pricing workbook that matches the RFP scope.</span></div>
+    <a className="btn btn-soft" href={PRICING_TEMPLATE_FULL} download>GIS, Telecom, PLA & LiDAR</a>
+    <a className="btn btn-soft" href={PRICING_TEMPLATE_GIS} download>GIS Only</a>
+   </div>
    <Field label="Pricing" className="span-2" hint="Commercial summary, budget or pricing notes."><Textarea rows={10} disabled={disabled} value={v.pricing||''} onChange={e=>set('pricing',e.target.value)}/></Field>
   </div>}
  </>
