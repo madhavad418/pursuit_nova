@@ -15,7 +15,8 @@ const QA_TONE={'Not started':'neutral','Questions submitted':'info','Answers rec
 const emptyForm={bid_status:'Initiated',name:'',department:'',country:'',region:'',description:'',rfp_date:'',submission_eta:'',qa_timeline:'',qa_status:'Not started',technical_response:'',technical_response_given_by:'',pricing:'',jsan_status:'Initiated',vendor_status:'Initiated'}
 
 const FIELD_TABS=['Overview','Description','Technical response','Pricing','Bid status']
-const BID_STATUSES=['Initiated','Pending','Submitted']
+const FALLBACK_BID=['Initiated','Pending','Submitted']
+const BID_TONE={'Initiated':'neutral','Pending':'warning','Submitted':'success'}
 // These tabs hold document uploads, which need a saved RFP id to attach to.
 const DOC_TABS=['Description','Technical response','Pricing']
 
@@ -30,7 +31,7 @@ function RfpApproval({rfp}){
  return <div className="rfp-approval-status"><Pill tone={rfp.approved_by?'success':'warning'}>{rfp.approved_by?'Approved':'Pending review'}</Pill>{rfp.approved_by&&<><span className="rfp-approval-person">Approved by <strong>{rfp.approved_by_name||'Approver'}</strong></span><small>{dateText(rfp.approved_at)}</small></>}</div>
 }
 
-function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,docsProps}){
+function RfpFields({v,set,statuses,qaStatuses,bidStatuses,disabled,tab,gotoTab,extraTabs,docsProps}){
  return <>
   <div className="tabs">{FIELD_TABS.map(x=><button key={x} type="button" className={tab===x?'active':''} onClick={()=>gotoTab(x)}>{x}</button>)}{extraTabs}</div>
   {tab==='Overview'&&<div className="form-grid">
@@ -58,7 +59,6 @@ function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,doc
    <Field label="JSAN technical response" className="span-2"><Textarea rows={10} disabled={disabled} value={v.technical_response||''} onChange={e=>set('technical_response',e.target.value)}/></Field>
   </div>}
   {tab==='Technical response'&&docsProps&&<RfpDocuments {...docsProps} category="technical_response"/>}
-  {tab==='Bid status'&&<div className="form-grid"><Field label="Bid status"><Select disabled={disabled} value={v.bid_status||'Initiated'} onChange={e=>set('bid_status',e.target.value)}>{BID_STATUSES.map(status=><option key={status}>{status}</option>)}</Select></Field></div>}
   {tab==='Pricing'&&docsProps&&<RfpDocuments {...docsProps} category="pricing"/>}
   {tab==='Pricing'&&<div className="form-grid">
    <div className="template-bar span-2">
@@ -66,6 +66,9 @@ function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,doc
     <a className="btn btn-soft" href={PRICING_TEMPLATE_FULL} download>Telecom, PLA & LiDAR</a>
     <a className="btn btn-soft" href={PRICING_TEMPLATE_GIS} download>GIS Only</a>
    </div>
+  </div>}
+  {tab==='Bid status'&&<div className="form-grid">
+   <Field label="Bid status"><Select disabled={disabled} value={v.bid_status||'Initiated'} onChange={e=>set('bid_status',e.target.value)}>{bidStatuses.map(s=><option key={s}>{s}</option>)}</Select></Field>
   </div>}
  </>
 }
@@ -77,7 +80,7 @@ export default function RfpsPage({route,onToast}){
  const canEdit=true
  const [reviewing,setReviewing]=useState(false); const [approving,setApproving]=useState(false)
  const [data,setData]=useState(null); const [error,setError]=useState(null)
- const [statusFilter,setStatusFilter]=useState('')
+ const [statusFilter,setStatusFilter]=useState(''); const [bidFilter,setBidFilter]=useState('')
  // `editor` holds whichever RFP is open for create/edit; it has no id until the first save.
  const [editor,setEditor]=useState(null); const [editorTab,setEditorTab]=useState('Overview'); const [saving,setSaving]=useState(false)
  const load=()=>{setError(null);api.get('/api/rfps').then(setData).catch(setError)}
@@ -85,7 +88,9 @@ export default function RfpsPage({route,onToast}){
  const statuses=data?.statuses||FALLBACK_STATUSES
  const qaStatuses=data?.qa_statuses||FALLBACK_QA
  const canDownload=!!data?.can_download
- const items=(data?.items||[]).filter(x=>!statusFilter||x.jsan_status===statusFilter||x.vendor_status===statusFilter)
+ const bidStatuses=data?.bid_statuses||FALLBACK_BID
+ const items=(data?.items||[]).filter(x=>(!statusFilter||x.jsan_status===statusFilter||x.vendor_status===statusFilter)&&(!bidFilter||(x.bid_status||'Initiated')===bidFilter))
+ const bidCounts=Object.fromEntries(bidStatuses.map(s=>[s,(data?.items||[]).filter(x=>(x.bid_status||'Initiated')===s).length]))
  const counts=Object.fromEntries(statuses.map(s=>[s,(data?.items||[]).filter(x=>x.jsan_status===s||x.vendor_status===s).length]))
  const openCreate=()=>{setReviewing(false);setEditor({...emptyForm});setEditorTab('Overview')}
  const openEdit=r=>{setReviewing(false);setEditor({...r});setEditorTab('Overview')}
@@ -154,6 +159,10 @@ export default function RfpsPage({route,onToast}){
      <option value="">All participation statuses</option>
      {statuses.map(s=><option key={s} value={s}>{s} ({counts[s]||0})</option>)}
     </Select>
+    <Select value={bidFilter} onChange={e=>setBidFilter(e.target.value)}>
+     <option value="">All bid statuses</option>
+     {bidStatuses.map(s=><option key={s} value={s}>{s} ({bidCounts[s]||0})</option>)}
+    </Select>
     <button className="icon-btn" onClick={load} title="Refresh" aria-label="Refresh"><span aria-hidden>↻</span></button>
    </div>
    {items.length?<section className="panel table-panel">
@@ -166,7 +175,7 @@ export default function RfpsPage({route,onToast}){
      {key:'qa_status',label:'Q&A',render:r=><Pill tone={QA_TONE[r.qa_status]||'neutral'}>{r.qa_status}</Pill>},
      {key:'jsan_status',label:'JSAN participation',render:r=><Pill tone={STATUS_TONE[r.jsan_status]||'neutral'}>{r.jsan_status}</Pill>},
      {key:'vendor_status',label:'With vendor',render:r=><Pill tone={STATUS_TONE[r.vendor_status]||'neutral'}>{r.vendor_status}</Pill>},
-     {key:'bid_status',label:'Bid status',render:r=><Pill tone={{Initiated:'neutral',Pending:'warning',Submitted:'info'}[r.bid_status]||'neutral'}>{r.bid_status||'Initiated'}</Pill>},
+     {key:'bid_status',label:'Bid status',render:r=><Pill tone={BID_TONE[r.bid_status]||'neutral'}>{r.bid_status||'Initiated'}</Pill>},
      {key:'document_count',label:'Docs',align:'right',render:r=>r.document_count||0},
      ...(canEdit?[{key:'_actions',label:'Actions',render:r=><div className="row-actions" onClick={e=>e.stopPropagation()}>{r.can_approve&&<Button variant="text" onClick={()=>openReview(r)}>Review & approve</Button>}<button className="icon-btn" title="Edit" aria-label={`Edit ${r.name}`} onClick={()=>openEdit(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title="Delete" aria-label={`Delete ${r.name}`} onClick={e=>removeRfp(e,r)}><Icon name="trash" size={16}/></button></div>}]:[])
     ]}/>
@@ -176,7 +185,7 @@ export default function RfpsPage({route,onToast}){
    {editor&&<>
     {editor.id&&<div className="template-bar"><div className="template-bar-copy"><RfpApproval rfp={editor}/>{!editor.approved_by&&<span>Technical response given by: {editor.technical_response_given_by||'Not specified'}</span>}</div>{reviewing&&editor.can_approve&&!editor.approved_by&&<Button type="button" disabled={approving} onClick={approve}>{approving?'Approving...':'Approve RFP'}</Button>}</div>}
     <form onSubmit={save}>
-     <RfpFields v={editor} set={(k,val)=>setEditor(d=>({...d,[k]:val}))} statuses={statuses} qaStatuses={qaStatuses} disabled={!canEdit||reviewing} tab={editorTab} gotoTab={gotoTab}
+     <RfpFields v={editor} set={(k,val)=>setEditor(d=>({...d,[k]:val}))} statuses={statuses} qaStatuses={qaStatuses} bidStatuses={bidStatuses} disabled={!canEdit||reviewing} tab={editorTab} gotoTab={gotoTab}
       docsProps={editor.id?{rfp:editor,canEdit:canEdit&&!reviewing,canDownload,onChanged:onDocsChanged,onToast}:null}
       extraTabs={editor.id?<button type="button" className={editorTab==='Documents'?'active':''} onClick={()=>gotoTab('Documents')}>Documents{editor.document_count?` (${editor.document_count})`:''}</button>:null}/>
      {editorTab!=='Documents'&&<div className="modal-actions"><Button type="button" variant="ghost" onClick={closeEditor}>{editor.id?'Close':'Cancel'}</Button>{canEdit&&!reviewing&&<Button type="submit" disabled={saving}>{saving?'Saving…':editor.id?'Save changes':'Add RFP'}</Button>}</div>}

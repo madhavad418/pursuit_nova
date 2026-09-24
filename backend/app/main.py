@@ -49,7 +49,7 @@ from app.db import (
     partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
     partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
     vendor_targets, VENDOR_REGISTRATION_STATUSES, record_people,
-    rfps, rfp_documents, RFP_STATUSES, RFP_QA_STATUSES, RFP_DOCUMENT_CATEGORIES,
+    rfps, rfp_documents, RFP_STATUSES, RFP_QA_STATUSES, RFP_BID_STATUSES, RFP_DOCUMENT_CATEGORIES,
 )
 
 APP_NAME = "JSAN PursuitNova"
@@ -1778,7 +1778,7 @@ def global_search(q:str=Query(min_length=2),u=Depends(current_user)):
     rfp_name={}
     for r in rows(select(rfps).where(_rfp_visibility(u))):
         rfp_name[r["id"]]=r["name"]
-        add(r,"RFP",r["id"],r["name"],f"JSAN: {r['jsan_status']} \u00b7 Vendor: {r['vendor_status']}",f"rfps?open={r['id']}")
+        add(r,"RFP",r["id"],r["name"],f"Bid: {r.get('bid_status') or 'Initiated'} \u00b7 JSAN: {r['jsan_status']} \u00b7 Vendor: {r['vendor_status']}",f"rfps?open={r['id']}")
     for d in rows(select(rfp_documents.c.id,rfp_documents.c.rfp_id,rfp_documents.c.filename,rfp_documents.c.category).where(rfp_documents.c.rfp_id.in_(list(rfp_name)))):
         add(d,"RFP document",d["id"],d["filename"],rfp_name.get(d["rfp_id"]),f"rfps?open={d['rfp_id']}")
 
@@ -3296,9 +3296,9 @@ def _rfp_status(value, label):
     return s
 
 def _rfp_bid_status(value):
-    status=value if value is not None else "Initiated"
-    if status not in ("Initiated","Pending","Submitted"): raise HTTPException(400,"Invalid bid status")
-    return status
+    s = value or "Initiated"
+    if s not in RFP_BID_STATUSES: raise HTTPException(400, "Invalid bid status")
+    return s
 
 def _rfp_qa_status(value):
     s = value or "Not started"
@@ -3333,7 +3333,7 @@ def list_rfps(u=Depends(current_user)):
         it["documents"] = docs_by_rfp.get(it["id"], [])
         it["document_count"] = len(it["documents"])
         it["can_approve"] = u["role"] in ("Admin","Super Admin") and it["approved_by"] is None
-    return {"items": items, "statuses": RFP_STATUSES, "qa_statuses": RFP_QA_STATUSES, "can_download": _rfp_can_download(u)}
+    return {"items": items, "statuses": RFP_STATUSES, "qa_statuses": RFP_QA_STATUSES, "bid_statuses": RFP_BID_STATUSES, "can_download": _rfp_can_download(u)}
 
 @app.post("/api/rfps")
 def create_rfp(p: Payload, u=Depends(require_csrf)):

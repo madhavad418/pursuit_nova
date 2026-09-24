@@ -707,6 +707,7 @@ vendor_targets = Table(
 # table or column is changed.
 RFP_STATUSES = ["Initiated", "In progress", "Submitted", "Awaited response", "Awarded to JSAN", "Not awarded to JSAN", "Close"]
 RFP_QA_STATUSES = ["Not started", "Questions submitted", "Answers received", "Closed"]
+RFP_BID_STATUSES = ["Initiated", "Pending", "Submitted"]
 rfps = Table(
     "rfps", metadata,
     Column("id", Integer, primary_key=True),
