@@ -53,7 +53,7 @@ function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,doc
   {tab==='Pricing'&&<div className="form-grid">
    <div className="template-bar span-2">
     <div className="template-bar-copy"><strong>Pricing</strong><span>Download the JSAN pricing workbook that matches the RFP scope.</span></div>
-    <a className="btn btn-soft" href={PRICING_TEMPLATE_FULL} download>GIS, Telecom, PLA & LiDAR</a>
+    <a className="btn btn-soft" href={PRICING_TEMPLATE_FULL} download>Telecom, PLA & LiDAR</a>
     <a className="btn btn-soft" href={PRICING_TEMPLATE_GIS} download>GIS Only</a>
    </div>
    <Field label="Pricing" className="span-2" hint="Commercial summary, budget or pricing notes."><Textarea rows={10} disabled={disabled} value={v.pricing||''} onChange={e=>set('pricing',e.target.value)}/></Field>
