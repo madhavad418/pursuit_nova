@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from datetime import date, timedelta, datetime
 from urllib.parse import urlparse
 
@@ -9,7 +10,24 @@ from sqlalchemy import (
     ForeignKey, UniqueConstraint, Index, create_engine, select, func, and_, or_, text, inspect
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import insert, update, delete
+
+def _load_env_file():
+    """Loads backend/.env for local runs. Real environment variables (Railway, Docker, tests) always win."""
+    if "pytest" in sys.modules: return  # tests configure their own throwaway database
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if not os.path.exists(path): return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line: continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'": value = value[1:-1]
+            if key and value: os.environ.setdefault(key, value)
+
+_load_env_file()
 
 def normalize_database_url(url: str) -> str:
     """Hosted PostgreSQL (Railway and others) hands out postgres:// or postgresql:// URLs; this app ships the psycopg 3 driver."""
@@ -26,12 +44,20 @@ if DATABASE_URL.startswith("sqlite:///./"):
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     DATABASE_URL = f"sqlite:///{abs_path}"
 
-engine: Engine = create_engine(
-    DATABASE_URL,
-    future=True,
-    pool_pre_ping=True,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-)
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
+if _IS_SQLITE:
+    engine: Engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args={"check_same_thread": False})
+    read_engine: Engine = engine
+else:
+    # Hosted PostgreSQL is a network hop away (~60 ms per round trip), so every avoidable round trip is page time.
+    # TCP keepalives + recycling replace pool_pre_ping's extra ping per checkout; reads (rows/row) retry once if a
+    # pooled connection turns out to be dead.
+    engine: Engine = create_engine(
+        DATABASE_URL, future=True, pool_pre_ping=False, pool_recycle=240,
+        connect_args={"keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3},
+    )
+    # Plain SELECTs need no transaction; autocommit skips the BEGIN/ROLLBACK round trips around each one.
+    read_engine: Engine = engine.execution_options(isolation_level="AUTOCOMMIT")
 metadata = MetaData()
 
 roles = Table(
@@ -464,6 +490,22 @@ kpi_actuals = Table(
     UniqueConstraint("user_id", "template_id", "month", name="uq_kpi_actual_user_tpl_month"),
 )
 
+kpi_submissions = Table(
+    "kpi_submissions", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("category", String(100), nullable=False),
+    Column("month", String(7), nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("status", String(20), nullable=False, default="submitted"),
+    Column("feedback", Text),
+    Column("overall_percentage", Float),
+    Column("reviewed_by", ForeignKey("users.id")),
+    Column("reviewed_at", DateTime),
+    UniqueConstraint("user_id", "category", "month", name="uq_kpi_submission"),
+)
+
+
 # ── Partnerships: a second, fully independent pipeline (channel / technology / strategic partners) ──
 # Mirrors companies/contacts/leads/meetings/moms/actions/opportunities/followups/opportunity_team/mom_attachments
 # exactly, in its own tables, so nothing here can ever change what the Prospects tab or its reports show.
@@ -671,13 +713,21 @@ rfps = Table(
     Column("name", String(220), nullable=False),
     Column("description", Text),
     Column("rfp_date", String(10)),
+    Column("department", Text),
+    Column("country", Text),
+    Column("region", Text),
     Column("submission_eta", String(10)),
     Column("qa_timeline", Text),
     Column("qa_status", String(40), nullable=False, default="Not started"),
     Column("technical_response", Text),
+    Column("technical_response_given_by", Text),
     Column("pricing", Text),
     Column("jsan_status", String(40), nullable=False, default="Initiated"),
     Column("vendor_status", String(40), nullable=False, default="Initiated"),
+    Column("bid_status", String(20), nullable=False, default="Initiated", server_default="Initiated"),
+    Column("approved_by", Integer),
+    Column("approved_by_name", Text),
+    Column("approved_at", DateTime),
     Column("created_by", ForeignKey("users.id"), nullable=False),
     Column("created_at", DateTime, server_default=func.current_timestamp()),
     Column("updated_at", DateTime, server_default=func.current_timestamp()),
@@ -685,7 +735,7 @@ rfps = Table(
 # Uploaded RFP documents. Every login with COMPANY_VIEW can preview a document in-page; only the
 # authorised custodian (RFP_DOWNLOAD_EMAIL) gets the Download action. `category` tags which sub-tab
 # a document belongs to: the general Documents tab, or the Description / Technical response tabs.
-RFP_DOCUMENT_CATEGORIES = ["general", "description", "technical_response"]
+RFP_DOCUMENT_CATEGORIES = ["general", "description", "technical_response", "pricing"]
 rfp_documents = Table(
     "rfp_documents", metadata,
     Column("id", Integer, primary_key=True),
@@ -824,14 +874,18 @@ def domain_from_url(value: str | None) -> str | None:
 def dictrow(r):
     return dict(r._mapping) if r is not None else None
 
+def _read(fn):
+    try:
+        with read_engine.connect() as c: return fn(c)
+    except DBAPIError as e:
+        if not e.connection_invalidated: raise
+        with read_engine.connect() as c: return fn(c)  # stale pooled connection was discarded; retry once
+
 def rows(stmt, params=None):
-    with engine.connect() as c:
-        res = c.execute(stmt, params or {})
-        return [dictrow(r) for r in res.fetchall()]
+    return _read(lambda c: [dictrow(r) for r in c.execute(stmt, params or {}).fetchall()])
 
 def row(stmt, params=None):
-    with engine.connect() as c:
-        return dictrow(c.execute(stmt, params or {}).fetchone())
+    return _read(lambda c: dictrow(c.execute(stmt, params or {}).fetchone()))
 
 def execute(stmt, params=None):
     with engine.begin() as c:
@@ -880,11 +934,23 @@ def _bootstrap_initial_admin():
 def _add_missing_columns():
     """create_all() never alters existing tables, so add columns introduced after a database was first created."""
     # Ensure new tables exist (safe even if AUTO_CREATE_SCHEMA=false)
-    for tbl in (kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
+    for tbl in (kpi_submissions, kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
                 partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
                 partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
                 vendor_targets, record_people, rfps, rfp_documents):
         tbl.create(engine, checkfirst=True)
+    rfp_columns={c["name"] for c in inspect(engine).get_columns("rfps")}
+    for rfp_column in ("department", "country", "region", "technical_response_given_by"):
+        if rfp_column not in rfp_columns:
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE rfps ADD COLUMN {rfp_column} TEXT"))
+    if "bid_status" not in rfp_columns:
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE rfps ADD COLUMN bid_status VARCHAR(20) NOT NULL DEFAULT 'Initiated'"))
+    for approval_column,approval_type in (("approved_by","INTEGER"),("approved_by_name","TEXT"),("approved_at","TIMESTAMP")):
+        if approval_column not in rfp_columns:
+            with engine.begin() as c:
+                c.execute(text(f"ALTER TABLE rfps ADD COLUMN {approval_column} {approval_type}"))
     if "created_by" not in {c["name"] for c in inspect(engine).get_columns("roles")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE roles ADD COLUMN created_by INTEGER"))

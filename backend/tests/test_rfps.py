@@ -23,9 +23,10 @@ def fresh(client):
 def test_rfp_crud_and_validation(client, login, csrf_headers):
     fresh(client); login(client, 'director@jsan.local'); h = csrf_headers(client)
     r = client.post('/api/rfps', headers=h, json={'data': {
+        'department': 'Telecom', 'country': 'India', 'region': 'APAC',
         'name': 'ABC Telecom Managed Services', 'description': 'National managed-services tender',
         'rfp_date': '2026-09-01', 'submission_eta': '2026-10-15', 'qa_timeline': 'Questions by 2026-09-20',
-        'qa_status': 'Questions submitted', 'technical_response': 'JSAN governance model', 'pricing': 'USD 1.2M',
+        'qa_status': 'Questions submitted', 'technical_response_given_by': 'Anita Rao', 'technical_response': 'JSAN governance model', 'pricing': 'USD 1.2M',
         'jsan_status': 'In progress', 'vendor_status': 'Initiated'}})
     assert r.status_code == 200, r.text
     rid = r.json()['id']
@@ -35,6 +36,8 @@ def test_rfp_crud_and_validation(client, login, csrf_headers):
     assert lst['statuses'][0] == 'Initiated' and 'Close' in lst['statuses']
     item = next(x for x in lst['items'] if x['id'] == rid)
     assert item['name'] == 'ABC Telecom Managed Services' and item['jsan_status'] == 'In progress'
+    assert (item['department'],item['country'],item['region']) == ('Telecom','India','APAC')
+    assert item['technical_response_given_by']=='Anita Rao'
     assert item['document_count'] == 0 and 'data' not in item
 
     # Validation: bad statuses, bad date and a missing name are all rejected
@@ -45,18 +48,21 @@ def test_rfp_crud_and_validation(client, login, csrf_headers):
     assert client.post('/api/rfps', headers=h, json={'data': {'description': 'no name'}}).status_code == 400
 
     # Both participation tracks update independently
-    u = client.put(f'/api/rfps/{rid}', headers=h, json={'data': {'jsan_status': 'Submitted', 'vendor_status': 'In progress', 'qa_status': 'Answers received'}})
+    u = client.put(f'/api/rfps/{rid}', headers=h, json={'data': {'technical_response_given_by':'Ravi Kumar', 'department': 'IT', 'country': 'France', 'region': '', 'jsan_status': 'Submitted', 'vendor_status': 'In progress', 'qa_status': 'Answers received'}})
     assert u.status_code == 200 and u.json()['jsan_status'] == 'Submitted' and u.json()['vendor_status'] == 'In progress'
 
+    saved=next(x for x in client.get('/api/rfps').json()['items'] if x['id']==rid)
+    assert saved['technical_response_given_by']=='Ravi Kumar'
+    assert (saved['department'],saved['country'],saved['region']) == ('IT','France',None)
     assert client.delete(f'/api/rfps/{rid}', headers=h).status_code == 200
     assert all(x['id'] != rid for x in client.get('/api/rfps').json()['items'])
 
 
-def test_rfp_view_needs_company_view_and_edit_needs_company_edit(client, login, csrf_headers):
-    # Presales Lead has COMPANY_VIEW but not COMPANY_EDIT
+def test_every_user_can_manage_own_rfps(client, login, csrf_headers):
+    # RFP access is available even without COMPANY_EDIT
     fresh(client); login(client, 'presales@jsan.local'); h = csrf_headers(client)
     assert client.get('/api/rfps').status_code == 200
-    assert client.post('/api/rfps', headers=h, json={'data': {'name': 'Nope'}}).status_code == 403
+    assert client.post('/api/rfps', headers=h, json={'data': {'name': 'My presales RFP'}}).status_code == 200
 
 
 def test_rfp_document_view_open_download_custodian_only(client, login, csrf_headers, monkeypatch):
@@ -100,3 +106,59 @@ def test_rfp_document_view_open_download_custodian_only(client, login, csrf_head
     # Uploader removes it; deleting the RFP would also clear its documents
     assert client.delete(f'/api/rfps/{rid}/attachments/{did}', headers=h).status_code == 200
     assert client.get(f'/api/rfps/{rid}/attachments/{did}').status_code == 404
+
+def test_pricing_workbook_upload(client, login, csrf_headers):
+    from pathlib import Path
+    fresh(client);login(client,'presales@jsan.local');h=csrf_headers(client)
+    rid=client.post('/api/rfps',headers=h,json={'data':{'name':'Workbook pricing'}}).json()['id']
+    workbook=Path(__file__).resolve().parents[2]/'frontend/public/templates/JSAN_GIS_Navigation_Pricing_Templates_v2.xlsx'
+    data=workbook.read_bytes()
+    path=f'/api/rfps/{rid}/attachments'
+    response=client.post(path,headers=h,data={'category':'pricing'},files={'file':('pricing.xlsx',data,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
+    assert response.status_code==200,response.text
+    assert response.json()['category']=='pricing'
+    item=next(r for r in client.get('/api/rfps').json()['items'] if r['id']==rid)
+    assert item['documents'][0]['filename']=='pricing.xlsx'
+    assert item['documents'][0]['category']=='pricing'
+    assert client.post(path,headers=h,data={'category':'pricing'},files={'file':('notes.pdf',b'%PDF-1.7','application/pdf')}).status_code==400
+
+def test_rfp_approval_once_and_shared_status(client, login, csrf_headers):
+    fresh(client);login(client,'presales@jsan.local')
+    rid=client.post('/api/rfps',headers=csrf_headers(client),json={'data':{'name':'Approval test','technical_response_given_by':'Ravi'}}).json()['id']
+    path=f'/api/rfps/{rid}/approve'
+    assert client.post(path,headers=csrf_headers(client)).status_code==403
+    fresh(client);login(client,'admin@jsan.local')
+    item=next(r for r in client.get('/api/rfps').json()['items'] if r['id']==rid)
+    assert item['can_approve'] and item['technical_response_given_by']=='Ravi'
+    assert client.post(path).status_code==403
+    approved=client.post(path,headers=csrf_headers(client))
+    assert approved.status_code==200,approved.text
+    assert approved.json()['approved_by_name']
+    fresh(client);login(client,'superadmin@jsan.local')
+    assert client.post(path,headers=csrf_headers(client)).status_code==409
+    item=next(r for r in client.get('/api/rfps').json()['items'] if r['id']==rid)
+    assert not item['can_approve'] and item['approved_by']==approved.json()['approved_by']
+    assert item['approved_by_name']==approved.json()['approved_by_name']
+    fresh(client);login(client,'presales@jsan.local')
+    item=next(r for r in client.get('/api/rfps').json()['items'] if r['id']==rid)
+    assert item['approved_by']==approved.json()['approved_by']
+    assert item['approved_by_name']==approved.json()['approved_by_name']
+    assert not item['can_approve']
+
+
+def test_concurrent_rfp_approval_has_one_winner(client, login):
+    from concurrent.futures import ThreadPoolExecutor
+    from sqlalchemy import insert,select
+    from app.db import engine,rfps,users
+    from fastapi import HTTPException
+    fresh(client);admin=login(client,'admin@jsan.local')['user']
+    fresh(client);superadmin=login(client,'superadmin@jsan.local')['user']
+    with engine.begin() as c:
+        owner=c.execute(select(users.c.id).where(users.c.email=='presales@jsan.local')).scalar_one()
+        rid=c.execute(insert(rfps).values(name='Concurrent approval',created_by=owner)).inserted_primary_key[0]
+    def approve(user):
+        try: main.approve_rfp(rid,u=user);return 200
+        except HTTPException as e: return e.status_code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(approve,[admin,superadmin]))
+    assert sorted(results)==[200,409]

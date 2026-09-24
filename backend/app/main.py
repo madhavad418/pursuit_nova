@@ -45,7 +45,7 @@ from app.db import (
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
     org_settings, fx_rates, field_permissions, saved_views, dashboard_preferences, microsoft_integrations,
-    kpi_templates, kpi_targets, kpi_actuals, generic_actions, mom_attachments,
+    kpi_templates, kpi_targets, kpi_actuals, kpi_submissions, generic_actions, mom_attachments,
     partner_companies, partner_contacts, partnerships, partner_opportunities, partner_meetings,
     partner_moms, partner_mom_attachments, partner_actions, partner_followups, partner_opportunity_team,
     vendor_targets, VENDOR_REGISTRATION_STATUSES, record_people,
@@ -73,6 +73,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 # that a document exists but cannot pull its bytes. Configurable for hand-over without a code change.
 RFP_DOWNLOAD_EMAIL=os.getenv("RFP_DOWNLOAD_EMAIL", "rreddy@jsanconsulting.com").strip().lower()
 RFP_DOCUMENTS_PER_RFP=10
+# Supplier Network search follows its navigation allowlist; RFPs use ownership visibility.
+SUPPLIER_NETWORK_TAB_EMAILS={"chandrikabr@jsanconsulting.com","kmehta@jsanconsulting.com","kdasari@jsanconsulting.com"}
 
 @asynccontextmanager
 async def lifespan(app):
@@ -254,12 +256,17 @@ def field_access(u, entity_type:str, field_name:str):
     r=row(select(field_permissions.c.can_view,field_permissions.c.can_edit).where(and_(field_permissions.c.role_id==row(select(users.c.role_id).where(users.c.id==u["id"]))["role_id"],field_permissions.c.entity_type==entity_type,field_permissions.c.field_name==field_name)))
     return (bool(r["can_view"]),bool(r["can_edit"])) if r else (True,True)
 
-def mask_fields(u, entity_type:str, record:dict):
+def hidden_fields(u, entity_type:str) -> set:
+    """Fields this user's role may not view for an entity type (same rule as field_access: no row means visible)."""
+    role=select(users.c.role_id).where(users.c.id==u["id"]).scalar_subquery()
+    return {r["field_name"] for r in rows(select(field_permissions.c.field_name).where(and_(field_permissions.c.role_id==role,field_permissions.c.entity_type==entity_type,field_permissions.c.can_view==False)))}
+
+def mask_fields(u, entity_type:str, record:dict, hidden:set|None=None):
     if not record: return record
+    if hidden is None: hidden=hidden_fields(u,entity_type)
     out=dict(record)
-    for f in list(out):
-        view,_=field_access(u,entity_type,f)
-        if not view: out[f]=None
+    for f in hidden:
+        if f in out: out[f]=None
     return out
 
 def ensure_fields_editable(u, entity_type:str, data:dict):
@@ -415,6 +422,30 @@ def can_view_lead(u, lead_id: int) -> bool:
         if row(select(opportunity_team.c.opportunity_id).select_from(opportunity_team.join(opportunities, opportunities.c.id==opportunity_team.c.opportunity_id)).where(and_(opportunities.c.lead_id==lead_id, opportunity_team.c.user_id==u["id"])).limit(1)): return True
     return False
 
+def _shared_ids(entity_type, user_id) -> set:
+    return {r["entity_id"] for r in rows(select(record_shares.c.entity_id).where(and_(record_shares.c.entity_type==entity_type,record_shares.c.user_id==user_id)))}
+
+def visible_lead_ids(u, co_owners=None) -> set:
+    """Every lead id can_view_lead would allow, computed in bulk (list pages would otherwise run ~5 queries per lead)."""
+    scope=set(scope_user_ids(u)); shared=_shared_ids("lead",u["id"]); co=co_owners if co_owners is not None else people_map("lead")
+    presales=set()
+    if u["role"] == "Presales Lead":
+        presales|={r["lead_id"] for r in rows(select(actions.c.lead_id).where(actions.c.assigned_to==u["id"]))}
+        presales|={r["lead_id"] for r in rows(select(actions.c.lead_id).select_from(record_people.join(actions,actions.c.id==record_people.c.entity_id)).where(and_(record_people.c.entity_type=="action",record_people.c.user_id==u["id"])))}
+        presales|={r["lead_id"] for r in rows(select(opportunities.c.lead_id).select_from(opportunity_team.join(opportunities,opportunities.c.id==opportunity_team.c.opportunity_id)).where(opportunity_team.c.user_id==u["id"]))}
+    out=set()
+    for l in rows(select(leads.c.id,leads.c.owner_id)):
+        owners={l["owner_id"]}|{p["id"] for p in co.get(l["id"],[])}
+        if owners&scope or l["id"] in shared or l["id"] in presales: out.add(l["id"])
+    return out
+
+def visible_opp_ids(u) -> set:
+    """Every opportunity id can_view_opp would allow, computed in bulk."""
+    scope=set(scope_user_ids(u)); shared=_shared_ids("opportunity",u["id"])
+    team={r["opportunity_id"] for r in rows(select(opportunity_team.c.opportunity_id).where(opportunity_team.c.user_id==u["id"]))}
+    return {o["id"] for o in rows(select(opportunities.c.id,opportunities.c.owner_id,opportunities.c.presales_owner_id))
+            if o["owner_id"] in scope or o.get("presales_owner_id")==u["id"] or o["id"] in shared or o["id"] in team}
+
 def can_edit_lead(u, lead_id: int) -> bool:
     if "LEAD_EDIT" not in u["permissions"]: return False
     owners=lead_owner_ids(lead_id)
@@ -495,13 +526,24 @@ def opportunity_rows(u):
         opportunities.join(companies, companies.c.id==opportunities.c.company_id).join(leads, leads.c.id==opportunities.c.lead_id).join(uo, uo.c.id==opportunities.c.owner_id).outerjoin(up, up.c.id==opportunities.c.presales_owner_id)
     )
     base=rows(stmt.order_by(opportunities.c.updated_at.desc()))
-    out=[]
+    out=[]; vis=visible_opp_ids(u) if base else set(); hidden=hidden_fields(u,"opportunity") if base else set()
     for x in base:
-        if can_view_opp(u,x["id"]):
+        if x["id"] in vis:
             try: x["age_days"]=(date.today()-x["created_at"].date()).days
             except Exception: x["age_days"]=0
-            out.append(mask_fields(u,"opportunity",x))
+            out.append(mask_fields(u,"opportunity",x,hidden))
     return out
+
+def primary_contact_names(contact_table) -> dict:
+    """{company_id: name} of each company's first contact (primary first, then oldest), in one query."""
+    out={}
+    for r in rows(select(contact_table.c.company_id,contact_table.c.name).order_by(contact_table.c.company_id,contact_table.c.is_primary.desc(),contact_table.c.id)):
+        out.setdefault(r["company_id"],r["name"])
+    return out
+
+def open_action_counts(action_table, key) -> dict:
+    col=action_table.c[key]
+    return {r[key]:r["n"] for r in rows(select(col,func.count().label("n")).where(action_table.c.status.not_in(["Completed","Cancelled"])).group_by(col))}
 
 def lead_rows(u):
     owner=users.alias("owner")
@@ -509,13 +551,13 @@ def lead_rows(u):
         leads.join(companies, companies.c.id==leads.c.company_id).join(owner, owner.c.id==leads.c.owner_id)
     ).order_by(leads.c.updated_at.desc())
     base=rows(stmt); out=[]; co=people_map("lead")
+    if not base: return out
+    vis=visible_lead_ids(u,co); pc=primary_contact_names(contacts); oa=open_action_counts(actions,"lead_id")
     for x in base:
-        if can_view_lead(u,x["id"]):
+        if x["id"] in vis:
             x["co_owners"]=co.get(x["id"],[])
-            ct=row(select(contacts.c.name).where(contacts.c.company_id==x["company_id"]).order_by(contacts.c.is_primary.desc(),contacts.c.id).limit(1))
-            x["primary_contact"]=ct["name"] if ct else None
-            ac=row(select(func.count()).select_from(actions).where(and_(actions.c.lead_id==x["id"], actions.c.status.not_in(["Completed","Cancelled"]))))
-            x["open_actions"]=list(ac.values())[0] if ac else 0
+            x["primary_contact"]=pc.get(x["company_id"])
+            x["open_actions"]=oa.get(x["id"],0)
             x["last_activity"]=(x["updated_at"].date().isoformat() if x.get("updated_at") else None)
             out.append(x)
     temporder={"Hot":0,"Warm":1,"Cold":2}; out.sort(key=lambda x:(temporder.get(x["temperature"],9), str(x.get("updated_at"))), reverse=False)
@@ -949,7 +991,7 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
            "can_reassign":editable and "LEAD_REASSIGN" in u["permissions"],"can_manage_owners":editable and "LEAD_REASSIGN" in u["permissions"] and is_admin_role(u),"can_delete":editable and u["role"] in ("Super Admin","Admin")}
     # Contact fields this role may not see or change (field permissions); the edit form keeps them locked
     perms["locked_contact_fields"]=[f for f in ("name","designation","email","phone","linkedin_url") if not all(field_access(u,"contact",f))]
-    return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
+    return {"lead":l,"contacts":cts,"meetings":mts,"moms":ms,"actions":acts,"linked_actions":generic_actions_for_company(u,l["company_name"]),"opportunities":opps,"followups":fs,"documents":docs,"timeline":timeline,"permissions":perms}
 
 @app.put("/api/leads/{lead_id}")
 def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
@@ -1145,19 +1187,20 @@ def delete_mom_attachment(mom_id:int,attachment_id:int,u=Depends(require_csrf)):
 
 @app.get("/api/meetings")
 def list_meetings(u=Depends(require_perm("LEAD_VIEW"))):
-    out=[]
+    out=[]; vis=None
     for m in rows(select(meetings,companies.c.name.label("company_name"),leads.c.owner_id).select_from(meetings.join(leads,leads.c.id==meetings.c.lead_id).join(companies,companies.c.id==leads.c.company_id)).order_by(meetings.c.meeting_date.desc())):
-        if can_view_lead(u,m["lead_id"]): out.append(m)
+        if vis is None: vis=visible_lead_ids(u)
+        if m["lead_id"] in vis: out.append(m)
     return out
 
 @app.get("/api/actions")
 def list_actions(filter:str=Query(default="all"),u=Depends(current_user)):
     aa=users.alias("aa"); cr=users.alias("cr")
     base=rows(select(actions,companies.c.name.label("company_name"),leads.c.temperature,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(actions.join(leads,leads.c.id==actions.c.lead_id).join(companies,companies.c.id==leads.c.company_id).join(aa,aa.c.id==actions.c.assigned_to).join(cr,cr.c.id==actions.c.created_by)).order_by(actions.c.due_date))
-    out=[]; t=today_str(); co=people_map("action")
+    out=[]; t=today_str(); co=people_map("action"); vis=visible_lead_ids(u) if base else set()
     for a in base:
         a["co_assignees"]=co.get(a["id"],[])
-        visible=is_assignee(a,u["id"]) or can_view_lead(u,a["lead_id"])
+        visible=is_assignee(a,u["id"]) or a["lead_id"] in vis
         if not visible: continue
         a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<t
         if filter=="my" and not is_assignee(a,u["id"]): continue
@@ -1235,6 +1278,47 @@ def generic_action_access(u,a):
     can_edit=visible and "ACTION_EDIT" in u["permissions"]
     can_delete=visible and (u["role"] in ("Super Admin","Admin") or a["created_by"]==u["id"])
     return visible,can_edit,can_delete
+
+# Actions-tab items are not tied to a prospect, so a prospect picks up the ones whose title names its company:
+# "WOOLPERT - Initial Outreach" -> Woolpert, "Skyline software" -> Skyline Software Systems, "Adentu" -> ADENTU.
+_LEGAL_WORDS={"pvt","private","ltd","limited","inc","llc","llp","corp","corporation","gmbh","plc","co","company","pty","sa","ag","ab","as","spol","s","r","o","sp","z","bv","nv","srl"}
+def _norm_words(text:str) -> list[str]:
+    return re.findall(r"[a-z0-9]+",(text or "").lower())
+
+def company_name_keys(name:str) -> list[str]:
+    """Normalised ways a company may be written: the full name and each part of "A / B" or "A (B)", minus legal suffixes."""
+    keys=[]
+    for part in re.split(r"[/()\u2013\u2014:]|\s-\s",name or ""):
+        w=_norm_words(part)
+        while w and w[-1] in _LEGAL_WORDS: w.pop()
+        k=" ".join(w)
+        if len(k)>=3 and k not in keys: keys.append(k)
+    return keys
+
+def title_names_company(title:str, keys:list[str]) -> bool:
+    t=" ".join(_norm_words(title))
+    if not t: return False
+    for k in keys:
+        # the company name inside the title (a short name must be a whole word, e.g. "SLA", "ISPN")
+        if re.search(r"(?<![a-z0-9])"+re.escape(k)+("" if len(k)>=5 else r"(?![a-z0-9])"),t): return True
+        # the whole title is the start of the company name ("Skyline software" -> "skyline software systems")
+        if len(t)>=4 and (k==t or k.startswith(t+" ")): return True
+    return False
+
+def generic_actions_for_company(u, company_name:str) -> list[dict]:
+    """Actions-tab items the user can see (same rule as the Actions tab) whose title names this company."""
+    keys=company_name_keys(company_name)
+    if not keys: return []
+    aa=users.alias("aa"); cr=users.alias("cr")
+    items=rows(select(generic_actions,aa.c.name.label("assigned_to_name"),cr.c.name.label("created_by_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to).join(cr,cr.c.id==generic_actions.c.created_by)).order_by(generic_actions.c.due_date,generic_actions.c.id))
+    items=[a for a in items if title_names_company(a["title"],keys)]
+    if not items: return []
+    attach_people(items,"generic_action","co_assignees"); t=today_str(); out=[]
+    for a in items:
+        if not generic_action_access(u,a)[0]: continue
+        a["overdue"]=a["status"] not in ("Completed","Cancelled") and a["due_date"]<t
+        out.append(a)
+    return out
 
 def generic_action_row(action_id,u):
     aa=users.alias("aa"); cr=users.alias("cr")
@@ -1446,12 +1530,15 @@ def forecast_summary(year:int=Query(default=date.today().year),quarter:str=Query
         x=to_corporate(v,c,rates)
         if x is None: missing.add(c or corp); return 0.0
         return x
+    # Names, roles and targets for everyone in scope, fetched once rather than per user.
+    people={r["id"]:r for r in rows(select(users.c.id,users.c.name,roles.c.name.label("role")).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(users.c.id.in_(visible)))} if visible else {}
+    tmap={r["user_id"]:r for r in rows(select(targets.c.user_id,targets.c.target_amount,targets.c.currency).where(and_(targets.c.user_id.in_(visible),targets.c.year==year,targets.c.quarter==quarter)))} if visible else {}
     for uid in visible:
-        su=safe_user(uid)
+        su=people.get(uid)
         if not su or su["role"] in {"Super Admin","Admin","Director","Presales Lead"}: continue
         mine_open=[o for o in os_ if o["owner_id"]==uid and not str(o.get("status") or "").startswith("Closed ") and o.get("expected_close_date") and start.isoformat()<=o["expected_close_date"]<end.isoformat()]
         mine_won=[o for o in os_ if o["owner_id"]==uid and o.get("status")=="Closed Won" and o.get("closed_at") and start.isoformat()<=o["closed_at"]<end.isoformat()]
-        target=row(select(targets.c.target_amount,targets.c.currency).where(and_(targets.c.user_id==uid,targets.c.year==year,targets.c.quarter==quarter))) or {"target_amount":0,"currency":corp}
+        target=tmap.get(uid) or {"target_amount":0,"currency":corp}
         pipeline=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Pipeline")
         best=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Best Case")
         commit=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Commit")
@@ -1598,19 +1685,105 @@ def run_workflows_for_user(u):
 def mark_notification(notification_id:int,u=Depends(require_csrf)):
     execute(update(notifications).where(and_(notifications.c.id==notification_id,notifications.c.user_id==u["id"])).values(read_at=utcnow())); return {"ok":True}
 
+# Fields never searched: keys, audit timestamps, dates, links and internal normalised/binary columns.
+_SEARCH_SKIP={"id","sha256","data","content_type","normalized_name","normalized_email","domain","filters_json"}
+def _search_fields(rec):
+    for k,v in rec.items():
+        if not isinstance(v,str) or not v.strip() or k in _SEARCH_SKIP or k.endswith("_id") or k.endswith("_at") or "date" in k or k.endswith("_eta") or k.endswith("_url"): continue
+        yield k,v
+
 @app.get("/api/search")
 def global_search(q:str=Query(min_length=2),u=Depends(current_user)):
-    needle=q.lower(); results=[]
-    if "COMPANY_VIEW" in u["permissions"]:
+    """Searches every text field of every record the user can open, across all modules."""
+    needle=q.strip().lower(); perms=u["permissions"]; email=(u.get("email") or "").strip().lower(); results=[]
+    if len(needle)<2: return []
+    def match(rec):
+        # (field label, snippet) for the first text field containing the search term, else None.
+        for k,v in _search_fields(rec):
+            i=v.lower().find(needle)
+            if i>=0:
+                a=max(0,i-40); b=min(len(v),i+len(needle)+60)
+                return k.replace("_"," ").capitalize(), ("\u2026" if a else "")+" ".join(v[a:b].split())+("\u2026" if b<len(v) else "")
+        return None
+    def add(rec,type_,id_,title,subtitle,link):
+        m=match(rec)
+        if not m: return
+        results.append({"type":type_,"id":id_,"title":title or "(untitled)","subtitle":subtitle or "","link":link,"field":m[0],"snippet":m[1],"_rank":0 if needle in str(title or "").lower() else 1})
+
+    lead_list=lead_rows(u) if "LEAD_VIEW" in perms else []
+    lead_ids={l["id"] for l in lead_list}; lead_name={l["id"]:l["company_name"] for l in lead_list}
+    lead_by_company={}
+    for l in lead_list: lead_by_company.setdefault(l["company_id"],l["id"])
+    def lead_link(lead_id): return f"lead/{lead_id}" if lead_id else "prospects"
+
+    if "COMPANY_VIEW" in perms:
         for c in rows(select(companies).where(companies.c.status!="Merged")):
-            if needle in (c["name"] or "").lower() or needle in (c.get("website") or "").lower(): results.append({"type":"Company","id":c["id"],"title":c["name"],"subtitle":c["vertical"]})
+            add(c,"Company",c["id"],c["name"],c.get("vertical"),lead_link(lead_by_company.get(c["id"])))
         for ct in rows(select(contacts,companies.c.name.label("company_name")).select_from(contacts.join(companies,companies.c.id==contacts.c.company_id)).where(contacts.c.active==True)):
-            if can_access_company_relationship(u,int(ct["company_id"])) and any(needle in (str(ct.get(k) or "")).lower() for k in ("name","email","phone","designation")): results.append({"type":"Contact","id":ct["id"],"company_id":ct["company_id"],"title":ct["name"],"subtitle":ct["company_name"]})
-    for l in lead_rows(u):
-        if needle in l["company_name"].lower() or needle in (l.get("remarks") or "").lower(): results.append({"type":"Lead","id":l["id"],"title":l["company_name"],"subtitle":f"{l['temperature']} · {l['status']} · {l['owner_name']}"})
-    for o in opportunity_rows(u):
-        if needle in o["name"].lower() or needle in o["company_name"].lower(): results.append({"type":"Opportunity","id":o["id"],"title":o["name"],"subtitle":f"{o['company_name']} · {o['status']}"})
-    return results[:50]
+            if match(ct) and can_access_company_relationship(u,int(ct["company_id"])):
+                add(ct,"Contact",ct["id"],ct["name"],ct["company_name"],lead_link(lead_by_company.get(ct["company_id"])))
+    for l in lead_list:
+        add(l,"Prospect",l["id"],l["company_name"],f"{l['temperature']} \u00b7 {l['status']} \u00b7 {l['owner_name']}",f"lead/{l['id']}")
+    if lead_ids:
+        for m in rows(select(meetings).where(meetings.c.lead_id.in_(lead_ids))):
+            add(m,"Meeting",m["id"],f"{m['meeting_type']} \u00b7 {m['meeting_date']}",lead_name.get(m["lead_id"]),f"lead/{m['lead_id']}")
+        for m in rows(select(moms).where(moms.c.lead_id.in_(lead_ids))):
+            add(m,"MOM",m["id"],(m["summary"] or "")[:80],lead_name.get(m["lead_id"]),f"lead/{m['lead_id']}")
+    aa=users.alias("aa")
+    for a in rows(select(actions,companies.c.name.label("company_name"),aa.c.name.label("assigned_to_name")).select_from(actions.join(leads,leads.c.id==actions.c.lead_id).join(companies,companies.c.id==leads.c.company_id).join(aa,aa.c.id==actions.c.assigned_to))):
+        if a["lead_id"] in lead_ids or a["assigned_to"]==u["id"]:
+            add(a,"Action",a["id"],(a["description"] or "")[:80],f"{a['company_name']} \u00b7 {a['status']} \u00b7 due {a['due_date']}",f"lead/{a['lead_id']}" if a["lead_id"] in lead_ids else "actions")
+    ga=select(generic_actions,aa.c.name.label("assigned_to_name")).select_from(generic_actions.join(aa,aa.c.id==generic_actions.c.assigned_to))
+    if not is_super(u):
+        ids=scope_user_ids(u)
+        co_visible=select(record_people.c.entity_id).where(and_(record_people.c.entity_type=="generic_action",record_people.c.user_id.in_(ids)))
+        ga=ga.where(or_(generic_actions.c.assigned_to.in_(ids),generic_actions.c.created_by.in_(ids),generic_actions.c.id.in_(co_visible)))
+    for a in rows(ga):
+        add(a,"Action",a["id"],a["title"],f"{a['action_type']} \u00b7 {a['status']} \u00b7 due {a['due_date']}","actions")
+    if "OPPORTUNITY_VIEW" in perms:
+        for o in opportunity_rows(u):
+            add(o,"Opportunity",o["id"],o["name"],f"{o['company_name']} \u00b7 {o['status']}",f"pipeline?opp={o['id']}")
+
+    # Partnerships module
+    pship_list=partnership_rows(u) if "LEAD_VIEW" in perms else []
+    pship_ids={x["id"] for x in pship_list}; pship_name={x["id"]:x["company_name"] for x in pship_list}
+    pship_by_company={}
+    for x in pship_list: pship_by_company.setdefault(x["company_id"],x["id"])
+    def pship_link(pid): return f"partnership/{pid}" if pid else "partnerships"
+    if "COMPANY_VIEW" in perms:
+        for c in rows(select(partner_companies).where(partner_companies.c.status!="Merged")):
+            if match(c) and can_access_partner_company_relationship(u,c["id"]):
+                add(c,"Partner company",c["id"],c["name"],c.get("vertical"),pship_link(pship_by_company.get(c["id"])))
+        for ct in rows(select(partner_contacts,partner_companies.c.name.label("company_name")).select_from(partner_contacts.join(partner_companies,partner_companies.c.id==partner_contacts.c.company_id)).where(partner_contacts.c.active==True)):
+            if match(ct) and can_access_partner_company_relationship(u,int(ct["company_id"])):
+                add(ct,"Partner contact",ct["id"],ct["name"],ct["company_name"],pship_link(pship_by_company.get(ct["company_id"])))
+    for x in pship_list:
+        add(x,"Partnership",x["id"],x["company_name"],f"{x['temperature']} \u00b7 {x['status']} \u00b7 {x['owner_name']}",f"partnership/{x['id']}")
+    if pship_ids:
+        for m in rows(select(partner_meetings).where(partner_meetings.c.partnership_id.in_(pship_ids))):
+            add(m,"Partner meeting",m["id"],f"{m['meeting_type']} \u00b7 {m['meeting_date']}",pship_name.get(m["partnership_id"]),f"partnership/{m['partnership_id']}")
+        for m in rows(select(partner_moms).where(partner_moms.c.partnership_id.in_(pship_ids))):
+            add(m,"Partner MOM",m["id"],(m["summary"] or "")[:80],pship_name.get(m["partnership_id"]),f"partnership/{m['partnership_id']}")
+    for a in rows(select(partner_actions,aa.c.name.label("assigned_to_name")).select_from(partner_actions.join(aa,aa.c.id==partner_actions.c.assigned_to))):
+        if a["partnership_id"] in pship_ids or a["assigned_to"]==u["id"]:
+            add(a,"Partner action",a["id"],(a["description"] or "")[:80],f"{pship_name.get(a['partnership_id'],'')} \u00b7 {a['status']} \u00b7 due {a['due_date']}",pship_link(a["partnership_id"] if a["partnership_id"] in pship_ids else None))
+    if "OPPORTUNITY_VIEW" in perms:
+        for o in partner_opportunity_rows(u):
+            add(o,"Partner opportunity",o["id"],o["name"],f"{o['company_name']} \u00b7 {o['status']}",pship_link(o["partnership_id"] if o["partnership_id"] in pship_ids else None))
+
+    # Supplier Network and RFPs are only searchable by the logins that can see those tabs.
+    if "COMPANY_VIEW" in perms and email in SUPPLIER_NETWORK_TAB_EMAILS:
+        for v in rows(select(vendor_targets,users.c.name.label("owner_name")).select_from(vendor_targets.outerjoin(users,users.c.id==vendor_targets.c.owner_id))):
+            add(v,"Supplier",v["id"],v["company_name"],f"{v.get('market') or ''} \u00b7 {v['registration_status']}",f"supplier-network?open={v['id']}")
+    rfp_name={}
+    for r in rows(select(rfps).where(_rfp_visibility(u))):
+        rfp_name[r["id"]]=r["name"]
+        add(r,"RFP",r["id"],r["name"],f"JSAN: {r['jsan_status']} \u00b7 Vendor: {r['vendor_status']}",f"rfps?open={r['id']}")
+    for d in rows(select(rfp_documents.c.id,rfp_documents.c.rfp_id,rfp_documents.c.filename,rfp_documents.c.category).where(rfp_documents.c.rfp_id.in_(list(rfp_name)))):
+        add(d,"RFP document",d["id"],d["filename"],rfp_name.get(d["rfp_id"]),f"rfps?open={d['rfp_id']}")
+
+    results.sort(key=lambda r:r.pop("_rank"))
+    return results[:100]
 
 @app.get("/api/reports/period")
 def period_report(year:int=Query(default=date.today().year),period:str=Query(default="Q1"),region:str=Query(default=""),u=Depends(require_perm("REPORT_VIEW"))):
@@ -1690,6 +1863,11 @@ def get_audit(u=Depends(require_perm("AUDIT_VIEW"))):
     stmt=select(audit_logs.c.id,audit_logs.c.user_id,users.c.name.label("user_name"),audit_logs.c.entity_type,audit_logs.c.entity_id,audit_logs.c.action,audit_logs.c.details,audit_logs.c.created_at).select_from(audit_logs.outerjoin(users,users.c.id==audit_logs.c.user_id))
     ids=log_user_scope(u)
     if ids is not None: stmt=stmt.where(audit_logs.c.user_id.in_(ids))
+    visible_rfps=select(rfps.c.id).where(_rfp_visibility(u))
+    visible_docs=select(rfp_documents.c.id).where(rfp_documents.c.rfp_id.in_(visible_rfps))
+    stmt=stmt.where(or_(audit_logs.c.entity_type.notin_(["rfp","rfp_document"]),
+        and_(audit_logs.c.entity_type=="rfp",audit_logs.c.entity_id.in_(visible_rfps)),
+        and_(audit_logs.c.entity_type=="rfp_document",audit_logs.c.entity_id.in_(visible_docs))))
     return rows(stmt.order_by(audit_logs.c.id.desc()).limit(300))
 
 @app.get("/api/security-logs")
@@ -2015,12 +2193,16 @@ def kpi_my_actuals(month:str=Query(default=""),u=Depends(current_user)):
     for t in tpls:
         act=act_map.get(t["id"],{})
         items.append({**t,"target_value":tgt_map.get(t["id"],0),"actual_value":act.get("actual_value"),"actual_remarks":act.get("remarks"),"actual_status":act.get("status","draft"),"review_remarks":act.get("review_remarks"),"actual_id":act.get("id")})
-    return {"category":cat,"month":month,"items":items}
+    return {"category":cat,"month":month,"items":items,"submission":kpi_summary(u["id"],cat,month)}
 
 @app.put("/api/kpi/actuals")
 def kpi_actual_upsert(p:Payload,u=Depends(require_csrf)):
     """User submits or updates their own KPI actual for a given template+month."""
     d=p.data; tid=int(d["template_id"]); month=d["month"]; val=float(d["actual_value"]); remarks=d.get("remarks","")
+    template=row(select(kpi_templates).where(kpi_templates.c.id==tid))
+    if not template or canon_category(template["category"])!=canon_category(u.get("category")): raise HTTPException(403,"KPI does not belong to your category")
+    submission=kpi_summary(u["id"],canon_category(template["category"]),month)
+    if submission and submission["status"]=="approved": raise HTTPException(400,"Submission is already approved")
     status=d.get("status","draft")
     if status not in ("draft","submitted"): status="draft"
     existing=row(select(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id==tid,kpi_actuals.c.month==month)))
@@ -2038,7 +2220,54 @@ def kpi_submit_month(p:Payload,u=Depends(require_csrf)):
     cat=u.get("category")
     if not cat: raise HTTPException(400,"No category assigned to your profile")
     tpl_ids=[t["id"] for t in rows(select(kpi_templates.c.id).where(kpi_templates.c.category.in_(category_names(cat))))]
-    execute(update(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id.in_(tpl_ids),kpi_actuals.c.month==month,kpi_actuals.c.status=="draft")).values(status="submitted",updated_at=utcnow()))
+    cat=canon_category(cat)
+    summary=str(p.data.get("summary", "")).strip()
+    if not summary: raise HTTPException(400,"Please describe your overall KPI work")
+    existing=kpi_summary(u["id"],cat,month)
+    if existing and existing["status"]=="approved": raise HTTPException(400,"Submission is already approved")
+    if not row(select(kpi_actuals.c.id).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.month==month,kpi_actuals.c.template_id.in_(tpl_ids)))): raise HTTPException(400,"Enter achieved values before submitting")
+    with engine.begin() as c:
+        values=dict(summary=summary,status="submitted",feedback=None,overall_percentage=None)
+        if existing: c.execute(update(kpi_submissions).where(kpi_submissions.c.id==existing["id"]).values(**values))
+        else: c.execute(insert(kpi_submissions).values(user_id=u["id"],category=cat,month=month,**values))
+        c.execute(update(kpi_actuals).where(and_(kpi_actuals.c.user_id==u["id"],kpi_actuals.c.template_id.in_(tpl_ids),kpi_actuals.c.month==month,kpi_actuals.c.status.in_(["draft","rejected"]))).values(status="submitted",updated_at=utcnow()))
+    return {"ok":True}
+
+def kpi_summary(uid,category,month):
+    return row(select(kpi_submissions).where(and_(kpi_submissions.c.user_id==uid,kpi_submissions.c.category.in_(category_names(category)),kpi_submissions.c.month==month)))
+
+@app.put("/api/kpi/review-overall")
+def kpi_legacy_overall_review(p:Payload,u=Depends(require_csrf)):
+    return kpi_submission_review(0,p,u)
+
+@app.put("/api/kpi/submissions/{submission_id}/review")
+def kpi_submission_review(submission_id:int,p:Payload,u=Depends(require_csrf)):
+    if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403,"Review requires admin role")
+    feedback=str(p.data.get("feedback", "")).strip()
+    if not feedback: raise HTTPException(400,"Please enter approver feedback")
+    with engine.begin() as c:
+        sub=c.execute(select(kpi_submissions).where(kpi_submissions.c.id==submission_id)).mappings().first()
+        if not sub and submission_id==0:
+            uid=p.data.get("user_id"); cat=canon_category(p.data.get("category")); month=p.data.get("month")
+            existing=c.execute(select(kpi_submissions).where(and_(kpi_submissions.c.user_id==uid,kpi_submissions.c.category.in_(category_names(cat)),kpi_submissions.c.month==month))).mappings().first()
+            if existing:
+                sub=existing; submission_id=sub["id"]
+            else:
+                legacy=c.execute(select(kpi_actuals.c.id).join(kpi_templates,kpi_templates.c.id==kpi_actuals.c.template_id).where(and_(kpi_actuals.c.user_id==uid,kpi_actuals.c.month==month,kpi_templates.c.category.in_(category_names(cat)),kpi_actuals.c.status.in_(["submitted","approved","rejected"])))).first()
+                if not legacy: raise HTTPException(404,"No submitted KPIs found")
+                submission_id=c.execute(insert(kpi_submissions).values(user_id=uid,category=cat,month=month,summary="",status="submitted")).inserted_primary_key[0]
+                sub=c.execute(select(kpi_submissions).where(kpi_submissions.c.id==submission_id)).mappings().one()
+        if not sub: raise HTTPException(404,"Submission not found")
+        if sub["status"]!="submitted": raise HTTPException(400,"Only submitted work can be approved")
+        templates=c.execute(select(kpi_templates.c.id).where(and_(kpi_templates.c.category.in_(category_names(sub["category"])),kpi_templates.c.active==True))).scalars().all()
+        condition=and_(kpi_actuals.c.user_id==sub["user_id"],kpi_actuals.c.month==sub["month"],kpi_actuals.c.template_id.in_(templates))
+        actuals=c.execute(select(kpi_actuals).where(condition)).mappings().all()
+        if any(a["status"] in ("draft","rejected") for a in actuals): raise HTTPException(400,"The person must resubmit updated KPIs before approval")
+        targets=c.execute(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_(templates),kpi_targets.c.month==sub["month"],kpi_targets.c.target_value>0))).mappings().all()
+        achieved={a["template_id"]:a["actual_value"] for a in actuals}
+        percentage=round(sum(achieved.get(t["template_id"],0)/t["target_value"]*100 for t in targets)/len(targets),2) if targets else None
+        c.execute(update(kpi_actuals).where(and_(condition,kpi_actuals.c.status=="submitted")).values(status="approved",reviewed_by=u["id"],reviewed_at=utcnow()))
+        c.execute(update(kpi_submissions).where(kpi_submissions.c.id==submission_id).values(status="approved",feedback=feedback,overall_percentage=percentage,reviewed_by=u["id"],reviewed_at=utcnow()))
     return {"ok":True}
 
 @app.get("/api/kpi/review")
@@ -2058,13 +2287,20 @@ def kpi_review_list(month:str=Query(default=""),user_id:int=Query(default=0),u=D
         for t in rows(select(kpi_targets).where(and_(kpi_targets.c.template_id.in_(tpl_ids),kpi_targets.c.month==month))):
             tgt_map[t["template_id"]]=t["target_value"]
     for i in items: i["target_value"]=tgt_map.get(i["template_id"],0)
-    # Group by user
+    # Group by the category submitted, not the person's current profile category.
     by_user={}
     for i in items:
-        uid=i["user_id"]
-        if uid not in by_user: by_user[uid]={"user_id":uid,"user_name":i["user_name"],"category":i["user_category"],"items":[]}
-        by_user[uid]["items"].append(i)
-    return list(by_user.values())
+        key=(i["user_id"],i["category"])
+        if key not in by_user: by_user[key]={"user_id":i["user_id"],"user_name":i["user_name"],"category":i["category"],"items":[],"submission":None}
+        by_user[key]["items"].append(i)
+    summary_stmt=select(kpi_submissions,users.c.name.label("user_name")).join(users,users.c.id==kpi_submissions.c.user_id).where(kpi_submissions.c.month==month)
+    if user_id: summary_stmt=summary_stmt.where(kpi_submissions.c.user_id==user_id)
+    for sub in rows(summary_stmt):
+        cat=canon_category(sub["category"]); key=(sub["user_id"],cat)
+        if key not in by_user: by_user[key]={"user_id":sub["user_id"],"user_name":sub["user_name"],"category":cat,"items":[],"submission":None}
+        sub.pop("user_name",None)
+        by_user[key]["submission"]=sub
+    return sorted(by_user.values(),key=lambda g:(g["user_name"],g["category"]))
 
 @app.put("/api/kpi/review/{actual_id}")
 def kpi_review_action(actual_id:int,p:Payload,u=Depends(require_csrf)):
@@ -2074,6 +2310,7 @@ def kpi_review_action(actual_id:int,p:Payload,u=Depends(require_csrf)):
     if status not in ("approved","rejected"): raise HTTPException(400,"Status must be approved or rejected")
     a=row(select(kpi_actuals).where(kpi_actuals.c.id==actual_id))
     if not a: raise HTTPException(404,"KPI entry not found")
+    if a["status"]!="submitted": raise HTTPException(400,"Only submitted KPI entries can be reviewed")
     execute(update(kpi_actuals).where(kpi_actuals.c.id==actual_id).values(status=status,reviewed_by=u["id"],review_remarks=d.get("review_remarks",""),reviewed_at=utcnow(),updated_at=utcnow()))
     return {"ok":True}
 
@@ -2346,6 +2583,21 @@ def can_view_partner_opp(u, opp_id: int) -> bool:
 def can_edit_partner_opp(u, opp_id: int) -> bool:
     return "OPPORTUNITY_EDIT" in u["permissions"] and can_view_partner_opp(u, opp_id)
 
+def visible_partnership_ids(u) -> set:
+    """Every partnership id can_view_partnership would allow, computed in bulk."""
+    scope=set(scope_user_ids(u)); shared=_shared_ids("partnership",u["id"]); presales=set()
+    if u["role"] == "Presales Lead":
+        presales|={r["partnership_id"] for r in rows(select(partner_actions.c.partnership_id).where(partner_actions.c.assigned_to==u["id"]))}
+        presales|={r["partnership_id"] for r in rows(select(partner_opportunities.c.partnership_id).select_from(partner_opportunity_team.join(partner_opportunities,partner_opportunities.c.id==partner_opportunity_team.c.opportunity_id)).where(partner_opportunity_team.c.user_id==u["id"]))}
+    return {x["id"] for x in rows(select(partnerships.c.id,partnerships.c.owner_id)) if x["owner_id"] in scope or x["id"] in shared or x["id"] in presales}
+
+def visible_partner_opp_ids(u) -> set:
+    """Every partner opportunity id can_view_partner_opp would allow, computed in bulk."""
+    scope=set(scope_user_ids(u)); shared=_shared_ids("partner_opportunity",u["id"])
+    team={r["opportunity_id"] for r in rows(select(partner_opportunity_team.c.opportunity_id).where(partner_opportunity_team.c.user_id==u["id"]))}
+    return {o["id"] for o in rows(select(partner_opportunities.c.id,partner_opportunities.c.owner_id,partner_opportunities.c.presales_owner_id))
+            if o["owner_id"] in scope or o.get("presales_owner_id")==u["id"] or o["id"] in shared or o["id"] in team}
+
 def can_access_partner_company_relationship(u, company_id: int) -> bool:
     if u.get("scope_type") == "all": return True
     for lr in rows(select(partnerships.c.id).where(partnerships.c.company_id==company_id)):
@@ -2360,12 +2612,12 @@ def partner_opportunity_rows(u):
         partner_opportunities.join(partner_companies, partner_companies.c.id==partner_opportunities.c.company_id).join(partnerships, partnerships.c.id==partner_opportunities.c.partnership_id).join(puo, puo.c.id==partner_opportunities.c.owner_id).outerjoin(pup, pup.c.id==partner_opportunities.c.presales_owner_id)
     )
     base=rows(stmt.order_by(partner_opportunities.c.updated_at.desc()))
-    out=[]
+    out=[]; vis=visible_partner_opp_ids(u) if base else set(); hidden=hidden_fields(u,"opportunity") if base else set()
     for x in base:
-        if can_view_partner_opp(u,x["id"]):
+        if x["id"] in vis:
             try: x["age_days"]=(date.today()-x["created_at"].date()).days
             except Exception: x["age_days"]=0
-            out.append(mask_fields(u,"opportunity",x))
+            out.append(mask_fields(u,"opportunity",x,hidden))
     return out
 
 def partnership_rows(u):
@@ -2374,12 +2626,12 @@ def partnership_rows(u):
         partnerships.join(partner_companies, partner_companies.c.id==partnerships.c.company_id).join(powner, powner.c.id==partnerships.c.owner_id)
     ).order_by(partnerships.c.updated_at.desc())
     base=rows(stmt); out=[]
+    if not base: return out
+    vis=visible_partnership_ids(u); pc=primary_contact_names(partner_contacts); oa=open_action_counts(partner_actions,"partnership_id")
     for x in base:
-        if can_view_partnership(u,x["id"]):
-            ct=row(select(partner_contacts.c.name).where(partner_contacts.c.company_id==x["company_id"]).order_by(partner_contacts.c.is_primary.desc(),partner_contacts.c.id).limit(1))
-            x["primary_contact"]=ct["name"] if ct else None
-            ac=row(select(func.count()).select_from(partner_actions).where(and_(partner_actions.c.partnership_id==x["id"], partner_actions.c.status.not_in(["Completed","Cancelled"]))))
-            x["open_actions"]=list(ac.values())[0] if ac else 0
+        if x["id"] in vis:
+            x["primary_contact"]=pc.get(x["company_id"])
+            x["open_actions"]=oa.get(x["id"],0)
             x["last_activity"]=(x["updated_at"].date().isoformat() if x.get("updated_at") else None)
             out.append(x)
     temporder={"Hot":0,"Warm":1,"Cold":2}; out.sort(key=lambda x:(temporder.get(x["temperature"],9), str(x.get("updated_at"))), reverse=False)
@@ -3010,9 +3262,8 @@ def delete_vendor_target(target_id: int, u=Depends(require_csrf)):
     return {"ok": True}
 
 # ── RFP (tender) tracking ───────────────────────────────────────────────────────────────────────
-# Additive feature on its own two tables (rfps, rfp_documents). Viewing follows COMPANY_VIEW and
-# editing COMPANY_EDIT, exactly like the Supplier Network; no existing table, route or rule changes.
-# Every COMPANY_VIEW login can preview an uploaded document in-page; only RFP_DOWNLOAD_EMAIL gets
+# RFP ownership and role visibility apply to records, documents, search and audit history.
+# All authenticated users can manage accessible RFPs; only RFP_DOWNLOAD_EMAIL gets
 # the explicit Download action (the "can_download" flag drives that in the UI).
 def _rfp_can_download(u) -> bool:
     return (u.get("email") or "").strip().lower() == RFP_DOWNLOAD_EMAIL
@@ -3022,8 +3273,15 @@ def _rfp_document_category(value) -> str:
     if c not in RFP_DOCUMENT_CATEGORIES: raise HTTPException(400, "Invalid document category")
     return c
 
-def _rfp_or_404(rfp_id: int):
-    r = row(select(rfps.c.id, rfps.c.name).where(rfps.c.id == rfp_id))
+def _rfp_visibility(u):
+    own=rfps.c.created_by==u["id"]
+    if u["role"] not in ("Admin","Super Admin"): return own
+    excluded=["Super Admin"] if u["role"]=="Super Admin" else ["Admin","Super Admin"]
+    visible_owners=select(users.c.id).join(roles,roles.c.id==users.c.role_id).where(roles.c.name.notin_(excluded))
+    return or_(own,rfps.c.created_by.in_(visible_owners))
+
+def _rfp_or_404(rfp_id: int,u):
+    r = row(select(rfps).where(and_(rfps.c.id==rfp_id,_rfp_visibility(u))))
     if not r: raise HTTPException(404, "RFP not found")
     return r
 
@@ -3036,6 +3294,11 @@ def _rfp_status(value, label):
     s = value or "Initiated"
     if s not in RFP_STATUSES: raise HTTPException(400, f"Invalid {label}")
     return s
+
+def _rfp_bid_status(value):
+    status=value if value is not None else "Initiated"
+    if status not in ("Initiated","Pending","Submitted"): raise HTTPException(400,"Invalid bid status")
+    return status
 
 def _rfp_qa_status(value):
     s = value or "Not started"
@@ -3053,10 +3316,10 @@ def _rfp_documents(rfp_id: int, u):
     return out
 
 @app.get("/api/rfps")
-def list_rfps(u=Depends(require_perm("COMPANY_VIEW"))):
+def list_rfps(u=Depends(current_user)):
     items = rows(select(rfps, users.c.name.label("created_by_name"))
                  .select_from(rfps.outerjoin(users, users.c.id == rfps.c.created_by))
-                 .order_by(rfps.c.id.desc()))
+                 .where(_rfp_visibility(u)).order_by(rfps.c.id.desc()))
     ids = [it["id"] for it in items]
     docs_by_rfp = defaultdict(list)
     if ids:
@@ -3069,40 +3332,53 @@ def list_rfps(u=Depends(require_perm("COMPANY_VIEW"))):
     for it in items:
         it["documents"] = docs_by_rfp.get(it["id"], [])
         it["document_count"] = len(it["documents"])
+        it["can_approve"] = u["role"] in ("Admin","Super Admin") and it["approved_by"] is None
     return {"items": items, "statuses": RFP_STATUSES, "qa_statuses": RFP_QA_STATUSES, "can_download": _rfp_can_download(u)}
 
 @app.post("/api/rfps")
 def create_rfp(p: Payload, u=Depends(require_csrf)):
-    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
     d = p.data
     name = _clean_text(d.get("name"), 220)
     if not name: raise HTTPException(400, "RFP name is required")
     rid = execute(insert(rfps).values(
+        bid_status=_rfp_bid_status(d.get("bid_status")),
+        department=_clean_text(d.get("department")), country=_clean_text(d.get("country")), region=_clean_text(d.get("region")),
         name=name, description=_clean_text(d.get("description")),
         rfp_date=_clean_rfp_date(d.get("rfp_date"), "Date of RFP"), submission_eta=_clean_rfp_date(d.get("submission_eta"), "Submission ETA"),
         qa_timeline=_clean_text(d.get("qa_timeline")), qa_status=_rfp_qa_status(d.get("qa_status")),
+        technical_response_given_by=_clean_text(d.get("technical_response_given_by")),
         technical_response=_clean_text(d.get("technical_response")), pricing=_clean_text(d.get("pricing")),
         jsan_status=_rfp_status(d.get("jsan_status"), "JSAN participation status"), vendor_status=_rfp_status(d.get("vendor_status"), "vendor participation status"),
         created_by=u["id"]))
     audit(u["id"], "rfp", rid, "CREATE", d)
     return row(select(rfps).where(rfps.c.id == rid))
 
+@app.post("/api/rfps/{rfp_id}/approve")
+def approve_rfp(rfp_id:int,u=Depends(require_csrf)):
+    if u["role"] not in ("Admin","Super Admin"): raise HTTPException(403,"Only admins and super admins can approve RFPs")
+    _rfp_or_404(rfp_id,u)
+    with engine.begin() as c:
+        result=c.execute(update(rfps).where(and_(rfps.c.id==rfp_id,_rfp_visibility(u),rfps.c.approved_by.is_(None))).values(approved_by=u["id"],approved_by_name=u["name"],approved_at=utcnow()))
+        if result.rowcount!=1: raise HTTPException(409,"This RFP has already been approved. Refresh to see the approval.")
+        c.execute(insert(audit_logs).values(user_id=u["id"],entity_type="rfp",entity_id=rfp_id,action="APPROVE",details=json.dumps({"approved_by_name":u["name"]})))
+    return row(select(rfps).where(rfps.c.id==rfp_id))
+
 @app.put("/api/rfps/{rfp_id}")
 def update_rfp(rfp_id: int, p: Payload, u=Depends(require_csrf)):
-    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
-    _rfp_or_404(rfp_id)
+    _rfp_or_404(rfp_id,u)
     d = p.data
-    vals = {k: d[k] for k in ("name", "description", "rfp_date", "submission_eta", "qa_timeline", "qa_status", "technical_response", "pricing", "jsan_status", "vendor_status") if k in d}
+    vals = {k: d[k] for k in ("name", "department", "country", "region", "description", "rfp_date", "submission_eta", "qa_timeline", "qa_status", "technical_response", "technical_response_given_by", "pricing", "jsan_status", "vendor_status", "bid_status") if k in d}
     if "name" in vals:
         vals["name"] = _clean_text(vals["name"], 220)
         if not vals["name"]: raise HTTPException(400, "RFP name is required")
-    for k in ("description", "qa_timeline", "technical_response", "pricing"):
+    for k in ("department", "country", "region", "description", "qa_timeline", "technical_response", "technical_response_given_by", "pricing"):
         if k in vals: vals[k] = _clean_text(vals[k])
     if "rfp_date" in vals: vals["rfp_date"] = _clean_rfp_date(vals["rfp_date"], "Date of RFP")
     if "submission_eta" in vals: vals["submission_eta"] = _clean_rfp_date(vals["submission_eta"], "Submission ETA")
     if "qa_status" in vals: vals["qa_status"] = _rfp_qa_status(vals["qa_status"])
     if "jsan_status" in vals: vals["jsan_status"] = _rfp_status(vals["jsan_status"], "JSAN participation status")
     if "vendor_status" in vals: vals["vendor_status"] = _rfp_status(vals["vendor_status"], "vendor participation status")
+    if "bid_status" in vals: vals["bid_status"] = _rfp_bid_status(vals["bid_status"])
     vals["updated_at"] = utcnow()
     execute(update(rfps).where(rfps.c.id == rfp_id).values(**vals))
     audit(u["id"], "rfp", rfp_id, "UPDATE", d)
@@ -3110,8 +3386,7 @@ def update_rfp(rfp_id: int, p: Payload, u=Depends(require_csrf)):
 
 @app.delete("/api/rfps/{rfp_id}")
 def delete_rfp(rfp_id: int, u=Depends(require_csrf)):
-    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
-    r = _rfp_or_404(rfp_id)
+    r = _rfp_or_404(rfp_id,u)
     execute(delete(rfp_documents).where(rfp_documents.c.rfp_id == rfp_id))  # explicit: SQLite does not enforce ON DELETE CASCADE by default
     execute(delete(rfps).where(rfps.c.id == rfp_id))
     audit(u["id"], "rfp", rfp_id, "DELETE", {"name": r["name"]})
@@ -3119,13 +3394,14 @@ def delete_rfp(rfp_id: int, u=Depends(require_csrf)):
 
 @app.post("/api/rfps/{rfp_id}/attachments")
 def upload_rfp_document(rfp_id: int, file: UploadFile = File(...), category: str = Form("general"), u=Depends(require_csrf)):
-    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
-    _rfp_or_404(rfp_id)
+    _rfp_or_404(rfp_id,u)
     cat = _rfp_document_category(category)
     count = (row(select(func.count().label("n")).select_from(rfp_documents).where(rfp_documents.c.rfp_id == rfp_id)) or {}).get("n", 0)
     if count >= RFP_DOCUMENTS_PER_RFP: raise HTTPException(400, f"An RFP can have at most {RFP_DOCUMENTS_PER_RFP} documents")
     data = file.file.read(MOM_ATTACHMENT_MAX_BYTES + 1)
     filename = _clean_filename(file.filename)
+    if cat=="pricing" and os.path.splitext(filename)[1].lower() not in (".xlsx", ".xls"):
+        raise HTTPException(400,"Pricing uploads must be Excel workbooks (.xlsx or .xls)")
     content_type = _validate_rfp_file(filename, data)
     digest = hashlib.sha256(data).hexdigest()
     did = execute(insert(rfp_documents).values(rfp_id=rfp_id, filename=filename, content_type=content_type, size_bytes=len(data), sha256=digest, data=data, category=cat, uploaded_by=u["id"]))
@@ -3133,10 +3409,10 @@ def upload_rfp_document(rfp_id: int, file: UploadFile = File(...), category: str
     return {"id": did, "rfp_id": rfp_id, "filename": filename, "size_bytes": len(data), "category": cat, "uploaded_by": u["id"], "uploaded_by_name": u["name"], "can_delete": True}
 
 @app.get("/api/rfps/{rfp_id}/attachments/{doc_id}")
-def view_rfp_document(rfp_id: int, doc_id: int, u=Depends(require_perm("COMPANY_VIEW"))):
+def view_rfp_document(rfp_id: int, doc_id: int, u=Depends(current_user)):
     # Every viewer may open the in-page preview; the actual save-to-disk affordance in the UI is
     # shown only to the authorised custodian (u["can_download"]/can_download on the list response).
-    _rfp_or_404(rfp_id)
+    _rfp_or_404(rfp_id,u)
     a = row(select(rfp_documents).where(and_(rfp_documents.c.id == doc_id, rfp_documents.c.rfp_id == rfp_id)))
     if not a: raise HTTPException(404, "Document not found")
     from urllib.parse import quote
@@ -3149,8 +3425,7 @@ def view_rfp_document(rfp_id: int, doc_id: int, u=Depends(require_perm("COMPANY_
 
 @app.delete("/api/rfps/{rfp_id}/attachments/{doc_id}")
 def delete_rfp_document(rfp_id: int, doc_id: int, u=Depends(require_csrf)):
-    if "COMPANY_EDIT" not in u["permissions"]: raise HTTPException(403, "Company edit permission required")
-    _rfp_or_404(rfp_id)
+    _rfp_or_404(rfp_id,u)
     a = row(select(rfp_documents.c.id, rfp_documents.c.filename, rfp_documents.c.uploaded_by).where(and_(rfp_documents.c.id == doc_id, rfp_documents.c.rfp_id == rfp_id)))
     if not a: raise HTTPException(404, "Document not found")
     if a["uploaded_by"] != u["id"] and not is_admin_role(u): raise HTTPException(403, "Only the uploader, Super Admin or Admin can remove this file")

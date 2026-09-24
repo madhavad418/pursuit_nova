@@ -2,7 +2,6 @@ import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
 import { Button,Empty,ErrorBanner,Field,Input,Modal,Pill,SectionHeader,Select,Spinner,Table,Textarea } from '../components/UI'
 import { Icon } from '../components/Icons'
-import { useAuth } from '../components/Auth'
 import { dateText } from '../lib/format'
 import RfpDocuments from '../components/RfpDocuments'
 
@@ -13,11 +12,12 @@ const FALLBACK_QA=['Not started','Questions submitted','Answers received','Close
 const STATUS_TONE={'Initiated':'neutral','In progress':'info','Submitted':'info','Awaited response':'warning','Awarded to JSAN':'success','Not awarded to JSAN':'danger','Close':'neutral'}
 const QA_TONE={'Not started':'neutral','Questions submitted':'info','Answers received':'success','Closed':'neutral'}
 
-const emptyForm={name:'',description:'',rfp_date:'',submission_eta:'',qa_timeline:'',qa_status:'Not started',technical_response:'',pricing:'',jsan_status:'Initiated',vendor_status:'Initiated'}
+const emptyForm={bid_status:'Initiated',name:'',department:'',country:'',region:'',description:'',rfp_date:'',submission_eta:'',qa_timeline:'',qa_status:'Not started',technical_response:'',technical_response_given_by:'',pricing:'',jsan_status:'Initiated',vendor_status:'Initiated'}
 
-const FIELD_TABS=['Overview','Description','Technical response','Pricing']
+const FIELD_TABS=['Overview','Description','Technical response','Pricing','Bid status']
+const BID_STATUSES=['Initiated','Pending','Submitted']
 // These tabs hold document uploads, which need a saved RFP id to attach to.
-const DOC_TABS=['Description','Technical response']
+const DOC_TABS=['Description','Technical response','Pricing']
 
 // JSAN's reference technical response with every answer removed, shipped from frontend/public/templates
 // (regenerate it with scripts/make_technical_response_template.py).
@@ -26,11 +26,18 @@ const TEMPLATE_FILE = '/templates/JSAN_Technical_Response_Template.docx'
 const PRICING_TEMPLATE_FULL = '/templates/JSAN_Pricing_Templates_GIS_Telecom_v1.xlsx'
 const PRICING_TEMPLATE_GIS = '/templates/JSAN_GIS_Navigation_Pricing_Templates_v2.xlsx'
 
+function RfpApproval({rfp}){
+ return <div className="rfp-approval-status"><Pill tone={rfp.approved_by?'success':'warning'}>{rfp.approved_by?'Approved':'Pending review'}</Pill>{rfp.approved_by&&<><span className="rfp-approval-person">Approved by <strong>{rfp.approved_by_name||'Approver'}</strong></span><small>{dateText(rfp.approved_at)}</small></>}</div>
+}
+
 function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,docsProps}){
  return <>
   <div className="tabs">{FIELD_TABS.map(x=><button key={x} type="button" className={tab===x?'active':''} onClick={()=>gotoTab(x)}>{x}</button>)}{extraTabs}</div>
   {tab==='Overview'&&<div className="form-grid">
    <Field label="RFP name" required className="span-2"><Input required maxLength={220} disabled={disabled} value={v.name||''} onChange={e=>set('name',e.target.value)} placeholder="e.g. ABC telecom managed-services tender"/></Field>
+   <Field label="Department"><Input disabled={disabled} value={v.department||''} onChange={e=>set('department',e.target.value)} placeholder="Enter department"/></Field>
+   <Field label="Country"><Input disabled={disabled} value={v.country||''} onChange={e=>set('country',e.target.value)} placeholder="Enter country"/></Field>
+   <Field label="Region"><Input disabled={disabled} value={v.region||''} onChange={e=>set('region',e.target.value)} placeholder="Enter region"/></Field>
    <Field label="Date of RFP"><Input type="date" disabled={disabled} value={v.rfp_date||''} onChange={e=>set('rfp_date',e.target.value)}/></Field>
    <Field label="ETA for submission"><Input type="date" disabled={disabled} value={v.submission_eta||''} onChange={e=>set('submission_eta',e.target.value)}/></Field>
    <Field label="JSAN participation status"><Select disabled={disabled} value={v.jsan_status||'Initiated'} onChange={e=>set('jsan_status',e.target.value)}>{statuses.map(s=><option key={s}>{s}</option>)}</Select></Field>
@@ -47,25 +54,28 @@ function RfpFields({v,set,statuses,qaStatuses,disabled,tab,gotoTab,extraTabs,doc
     <div className="template-bar-copy"><strong>JSAN technical response template</strong><span>The reference response with every answer removed - 13 sections, exhibit tables and evidence columns, ready to fill in.</span></div>
     <a className="btn btn-soft" href={TEMPLATE_FILE} download>Download template (.docx)</a>
    </div>
+   <Field label="Technical response given by" className="span-2"><Textarea rows={2} disabled={disabled} value={v.technical_response_given_by||''} onChange={e=>set('technical_response_given_by',e.target.value)} placeholder="Enter the name of the person who provided the technical response"/></Field>
    <Field label="JSAN technical response" className="span-2"><Textarea rows={10} disabled={disabled} value={v.technical_response||''} onChange={e=>set('technical_response',e.target.value)}/></Field>
   </div>}
   {tab==='Technical response'&&docsProps&&<RfpDocuments {...docsProps} category="technical_response"/>}
+  {tab==='Bid status'&&<div className="form-grid"><Field label="Bid status"><Select disabled={disabled} value={v.bid_status||'Initiated'} onChange={e=>set('bid_status',e.target.value)}>{BID_STATUSES.map(status=><option key={status}>{status}</option>)}</Select></Field></div>}
+  {tab==='Pricing'&&docsProps&&<RfpDocuments {...docsProps} category="pricing"/>}
   {tab==='Pricing'&&<div className="form-grid">
    <div className="template-bar span-2">
     <div className="template-bar-copy"><strong>Pricing</strong><span>Download the JSAN pricing workbook that matches the RFP scope.</span></div>
     <a className="btn btn-soft" href={PRICING_TEMPLATE_FULL} download>Telecom, PLA & LiDAR</a>
     <a className="btn btn-soft" href={PRICING_TEMPLATE_GIS} download>GIS Only</a>
    </div>
-   <Field label="Pricing" className="span-2" hint="Commercial summary, budget or pricing notes."><Textarea rows={10} disabled={disabled} value={v.pricing||''} onChange={e=>set('pricing',e.target.value)}/></Field>
   </div>}
  </>
 }
 
-const FORM_KEYS=['name','description','rfp_date','submission_eta','qa_timeline','qa_status','technical_response','pricing','jsan_status','vendor_status']
+const FORM_KEYS=['bid_status','name','department','country','region','description','rfp_date','submission_eta','qa_timeline','qa_status','technical_response','technical_response_given_by','pricing','jsan_status','vendor_status']
 const pick=(o,keys)=>Object.fromEntries(keys.map(k=>[k,o[k]]))
 
-export default function RfpsPage({onToast}){
- const {has}=useAuth(); const canEdit=has('COMPANY_EDIT')
+export default function RfpsPage({route,onToast}){
+ const canEdit=true
+ const [reviewing,setReviewing]=useState(false); const [approving,setApproving]=useState(false)
  const [data,setData]=useState(null); const [error,setError]=useState(null)
  const [statusFilter,setStatusFilter]=useState('')
  // `editor` holds whichever RFP is open for create/edit; it has no id until the first save.
@@ -77,8 +87,20 @@ export default function RfpsPage({onToast}){
  const canDownload=!!data?.can_download
  const items=(data?.items||[]).filter(x=>!statusFilter||x.jsan_status===statusFilter||x.vendor_status===statusFilter)
  const counts=Object.fromEntries(statuses.map(s=>[s,(data?.items||[]).filter(x=>x.jsan_status===s||x.vendor_status===s).length]))
- const openCreate=()=>{setEditor({...emptyForm});setEditorTab('Overview')}
- const openEdit=r=>{setEditor({...r});setEditorTab('Overview')}
+ const openCreate=()=>{setReviewing(false);setEditor({...emptyForm});setEditorTab('Overview')}
+ const openEdit=r=>{setReviewing(false);setEditor({...r});setEditorTab('Overview')}
+ // Global search links here as rfps?open=<id>; open that RFP once the list has loaded.
+ const openId=route?.query?.get('open')
+ useEffect(()=>{if(!openId||!data)return; const r=data.items?.find(x=>String(x.id)===openId); if(r)openEdit(r)},[openId,data])
+ const openReview=r=>{setReviewing(true);setEditor({...r});setEditorTab('Overview')}
+ const approve=async()=>{
+  setApproving(true)
+  try{const approved=await api.post(`/api/rfps/${editor.id}/approve`,{});setEditor(cur=>({...cur,...approved,can_approve:false}));onToast?.({message:'RFP approved'});load()}
+  catch(err){onToast?.({type:'error',message:err.message});const fresh=await api.get('/api/rfps').catch(()=>null);if(fresh){setData(fresh);setEditor(cur=>fresh.items.find(r=>r.id===cur?.id)||cur)}}
+  finally{setApproving(false)}
+ }
+ useEffect(()=>{const refresh=()=>load();const timer=setInterval(refresh,30000);window.addEventListener('focus',refresh);return()=>{clearInterval(timer);window.removeEventListener('focus',refresh)}},[])
+ useEffect(()=>{if(data)setEditor(cur=>{if(!cur?.id)return cur;const fresh=data.items.find(r=>r.id===cur.id);return fresh?{...cur,approved_by:fresh.approved_by,approved_by_name:fresh.approved_by_name,approved_at:fresh.approved_at,can_approve:fresh.can_approve}:cur})},[data])
  const closeEditor=()=>{setEditor(null)}
  // Pull fresh rows after a document change, patching only the open editor's documents so unsaved field edits survive.
  const onDocsChanged=async()=>{try{const d=await api.get('/api/rfps');setData(d);setEditor(cur=>{if(!cur?.id)return cur;const fresh=d.items.find(x=>x.id===cur.id);return fresh?{...cur,documents:fresh.documents,document_count:fresh.document_count}:cur})}catch(e){setError(e)}}
@@ -137,25 +159,29 @@ export default function RfpsPage({onToast}){
    {items.length?<section className="panel table-panel">
     <Table keyField="id" rows={items} onRowClick={openEdit} columns={[
      {key:'name',label:'RFP',render:r=><div className="primary-cell"><strong>{r.name}</strong><span className="clamp-2">{r.description||'No description'}</span></div>},
+     {key:'technical_response_given_by',label:'Technical response given by',render:r=>r.technical_response_given_by||'Not specified'},
+     {key:'approval',label:'Approval / Approved by',render:r=><RfpApproval rfp={r}/>},
      {key:'rfp_date',label:'Date of RFP',render:r=>dateText(r.rfp_date)},
      {key:'submission_eta',label:'Submission ETA',render:r=>dateText(r.submission_eta)},
      {key:'qa_status',label:'Q&A',render:r=><Pill tone={QA_TONE[r.qa_status]||'neutral'}>{r.qa_status}</Pill>},
      {key:'jsan_status',label:'JSAN participation',render:r=><Pill tone={STATUS_TONE[r.jsan_status]||'neutral'}>{r.jsan_status}</Pill>},
      {key:'vendor_status',label:'With vendor',render:r=><Pill tone={STATUS_TONE[r.vendor_status]||'neutral'}>{r.vendor_status}</Pill>},
+     {key:'bid_status',label:'Bid status',render:r=><Pill tone={{Initiated:'neutral',Pending:'warning',Submitted:'info'}[r.bid_status]||'neutral'}>{r.bid_status||'Initiated'}</Pill>},
      {key:'document_count',label:'Docs',align:'right',render:r=>r.document_count||0},
-     ...(canEdit?[{key:'_actions',label:'Actions',render:r=><div className="row-actions" onClick={e=>e.stopPropagation()}><button className="icon-btn" title="Edit" aria-label={`Edit ${r.name}`} onClick={()=>openEdit(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title="Delete" aria-label={`Delete ${r.name}`} onClick={e=>removeRfp(e,r)}><Icon name="trash" size={16}/></button></div>}]:[])
+     ...(canEdit?[{key:'_actions',label:'Actions',render:r=><div className="row-actions" onClick={e=>e.stopPropagation()}>{r.can_approve&&<Button variant="text" onClick={()=>openReview(r)}>Review & approve</Button>}<button className="icon-btn" title="Edit" aria-label={`Edit ${r.name}`} onClick={()=>openEdit(r)}><Icon name="edit" size={16}/></button><button className="icon-btn text-danger" title="Delete" aria-label={`Delete ${r.name}`} onClick={e=>removeRfp(e,r)}><Icon name="trash" size={16}/></button></div>}]:[])
     ]}/>
    </section>:<Empty title="No RFPs in this view" text="Change the filter, or add the first RFP you are pursuing."/>}
   </>}
   <Modal open={!!editor} onClose={closeEditor} title={editor?.id?editor.name:'Add RFP'} eyebrow={editor?.id?'RFP detail':'New tender'} size="xl">
    {editor&&<>
+    {editor.id&&<div className="template-bar"><div className="template-bar-copy"><RfpApproval rfp={editor}/>{!editor.approved_by&&<span>Technical response given by: {editor.technical_response_given_by||'Not specified'}</span>}</div>{reviewing&&editor.can_approve&&!editor.approved_by&&<Button type="button" disabled={approving} onClick={approve}>{approving?'Approving...':'Approve RFP'}</Button>}</div>}
     <form onSubmit={save}>
-     <RfpFields v={editor} set={(k,val)=>setEditor(d=>({...d,[k]:val}))} statuses={statuses} qaStatuses={qaStatuses} disabled={!canEdit} tab={editorTab} gotoTab={gotoTab}
-      docsProps={editor.id?{rfp:editor,canEdit,canDownload,onChanged:onDocsChanged,onToast}:null}
+     <RfpFields v={editor} set={(k,val)=>setEditor(d=>({...d,[k]:val}))} statuses={statuses} qaStatuses={qaStatuses} disabled={!canEdit||reviewing} tab={editorTab} gotoTab={gotoTab}
+      docsProps={editor.id?{rfp:editor,canEdit:canEdit&&!reviewing,canDownload,onChanged:onDocsChanged,onToast}:null}
       extraTabs={editor.id?<button type="button" className={editorTab==='Documents'?'active':''} onClick={()=>gotoTab('Documents')}>Documents{editor.document_count?` (${editor.document_count})`:''}</button>:null}/>
-     {editorTab!=='Documents'&&<div className="modal-actions"><Button type="button" variant="ghost" onClick={closeEditor}>{editor.id?'Close':'Cancel'}</Button>{canEdit&&<Button type="submit" disabled={saving}>{saving?'Saving…':editor.id?'Save changes':'Add RFP'}</Button>}</div>}
+     {editorTab!=='Documents'&&<div className="modal-actions"><Button type="button" variant="ghost" onClick={closeEditor}>{editor.id?'Close':'Cancel'}</Button>{canEdit&&!reviewing&&<Button type="submit" disabled={saving}>{saving?'Saving…':editor.id?'Save changes':'Add RFP'}</Button>}</div>}
     </form>
-    {editorTab==='Documents'&&editor.id&&<RfpDocuments rfp={editor} category="all" canEdit={canEdit} canDownload={canDownload} onChanged={onDocsChanged} onToast={onToast}/>}
+    {editorTab==='Documents'&&editor.id&&<RfpDocuments rfp={editor} category="all" canEdit={canEdit&&!reviewing} canDownload={canDownload} onChanged={onDocsChanged} onToast={onToast}/>}
    </>}
   </Modal>
  </>

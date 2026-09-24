@@ -12,18 +12,18 @@ import { fetchAttachmentBlob,downloadAttachment,formatBytes,uploadMomFiles } fro
 const BASE='/api/rfps'
 const MAX_FILES=10
 const MAX_BYTES=10*1024*1024
-const LABELS={general:'RFP documents',description:'Description documents',technical_response:'Technical response documents'}
+const LABELS={general:'RFP documents',description:'Description documents',technical_response:'Technical response documents',pricing:'Pricing workbooks'}
 const ACCEPT='.docx,.doc,.pdf,.xlsx,.xls,.pptx,.ppt,.csv,.txt,.rtf,.zip,.png,.jpg,.jpeg,.gif,.msg'
 const ALLOWED_EXT=ACCEPT.split(',')
-const CATEGORY_LABEL={general:'General',description:'Description',technical_response:'Technical response'}
+const CATEGORY_LABEL={general:'General',description:'Description',technical_response:'Technical response',pricing:'Pricing'}
 
 function extOf(name){const m=/\.[^.]+$/.exec(name||'');return m?m[0].toLowerCase():''}
 
-function checkRfpFiles(files,existingCount=0){
+function checkRfpFiles(files,existingCount=0,excelOnly=false){
  const ok=[],errors=[]
  for(const f of files){
   const ext=extOf(f.name)
-  if(!ALLOWED_EXT.includes(ext)) errors.push(`${f.name}: file type not supported`)
+  if(!(excelOnly?['.xlsx','.xls']:ALLOWED_EXT).includes(ext)) errors.push(`${f.name}: file type not supported`)
   else if(f.size===0) errors.push(`${f.name}: the file is empty`)
   else if(f.size>MAX_BYTES) errors.push(`${f.name}: larger than 10 MB`)
   else ok.push(f)
@@ -33,13 +33,13 @@ function checkRfpFiles(files,existingCount=0){
  return {ok,errors}
 }
 
-function FilePicker({files,onChange,onError}){
+function FilePicker({files,onChange,onError,excelOnly=false}){
  const inputRef=useRef(null)
- const add=list=>{const {ok,errors}=checkRfpFiles([...files,...list]);if(errors.length)onError?.(errors.join('\n'));onChange(ok)}
+ const add=list=>{const {ok,errors}=checkRfpFiles([...files,...list],0,excelOnly);if(errors.length)onError?.(errors.join('\n'));onChange(ok)}
  return <div className="docx-picker">
-  <input ref={inputRef} type="file" accept={ACCEPT} multiple hidden onChange={e=>{add([...e.target.files]);e.target.value=''}}/>
+  <input ref={inputRef} type="file" accept={excelOnly?'.xlsx,.xls':ACCEPT} multiple hidden onChange={e=>{add([...e.target.files]);e.target.value=''}}/>
   <button type="button" className="docx-drop" onClick={()=>inputRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();add([...e.dataTransfer.files])}}>
-   <Icon name="note" size={18}/><span><strong>Attach a document</strong><small>Word, Excel, PowerPoint, PDF, image, text, zip · up to 10 MB each · click or drop files here</small></span>
+   <Icon name="note" size={18}/><span><strong>{excelOnly?'Attach an Excel workbook':'Attach a document'}</strong><small>{excelOnly?'Excel (.xlsx, .xls)':'Word, Excel, PowerPoint, PDF, image, text, zip'} · up to 10 MB each · click or drop files here</small></span>
   </button>
   {files.length>0&&<ul className="docx-files">{files.map((f,i)=><li key={f.name+i}><Icon name="note" size={14}/><span>{f.name}</span><small>{formatBytes(f.size)}</small><button type="button" className="icon-btn" aria-label={`Remove ${f.name}`} onClick={()=>onChange(files.filter((_,j)=>j!==i))}><Icon name="close" size={14}/></button></li>)}</ul>}
  </div>
@@ -109,7 +109,7 @@ export default function RfpDocuments({rfp,category='general',canEdit,canDownload
  // The server caps documents per RFP across all sub-tabs combined, not per sub-tab — match that here
  // so the "room left" check and the disabled-upload-button state don't drift from what the API allows.
  const upload=async()=>{
-  const {ok,errors}=checkRfpFiles(files,all.length); if(errors.length)fail(errors.join('\n')); if(!ok.length)return
+  const {ok,errors}=checkRfpFiles(files,all.length,category==='pricing'); if(errors.length)fail(errors.join('\n')); if(!ok.length)return
   setBusy(true)
   const {uploaded,failed}=await uploadMomFiles(rfp.id,ok,BASE,{category:uploadCategory})
   setBusy(false)
@@ -119,7 +119,7 @@ export default function RfpDocuments({rfp,category='general',canEdit,canDownload
  }
  const remove=async doc=>{if(!confirm(`Remove "${doc.filename}" from this RFP?`))return;try{await api.delete(`${BASE}/${rfp.id}/attachments/${doc.id}`);onToast?.({message:'Document removed'});onChanged?.()}catch(e){fail(e.message)}}
  return <div className="mom-attachments">
-  <div className="mom-attachments-head"><b>{category==='all'?'All documents':(LABELS[category]||'Documents')}</b>{canEdit&&!adding&&all.length<MAX_FILES&&<Button type="button" variant="text" icon="plus" onClick={()=>setAdding(true)}>Upload document</Button>}</div>
+  <div className="mom-attachments-head"><b>{category==='all'?'All documents':(LABELS[category]||'Documents')}</b>{canEdit&&!adding&&all.length<MAX_FILES&&<Button type="button" variant="text" icon="plus" onClick={()=>setAdding(true)}>{category==='pricing'?'Upload workbook':'Upload document'}</Button>}</div>
   {documents.length>0?<ul className="docx-files">{documents.map(doc=><li key={doc.id}>
    <Icon name="note" size={14}/>
    <button type="button" className="docx-name" onClick={()=>setViewing(doc)} title="View document">{doc.filename}</button>
@@ -132,7 +132,7 @@ export default function RfpDocuments({rfp,category='general',canEdit,canDownload
     {canEdit&&doc.can_delete&&<button type="button" className="icon-btn text-danger" title="Remove" aria-label={`Remove ${doc.filename}`} onClick={()=>remove(doc)}><Icon name="trash" size={15}/></button>}
    </div>
   </li>)}</ul>:!adding&&<p className="mom-attachments-empty">No documents uploaded.</p>}
-  {adding&&<div className="mom-attach-form"><FilePicker files={files} onChange={setFiles} onError={fail}/><div className="modal-actions"><Button type="button" variant="ghost" onClick={()=>{setAdding(false);setFiles([])}}>Cancel</Button><Button type="button" onClick={upload} disabled={!files.length||busy}>{busy?'Uploading…':'Upload'}</Button></div></div>}
+  {adding&&<div className="mom-attach-form"><FilePicker excelOnly={category==='pricing'} files={files} onChange={setFiles} onError={fail}/><div className="modal-actions"><Button type="button" variant="ghost" onClick={()=>{setAdding(false);setFiles([])}}>Cancel</Button><Button type="button" onClick={upload} disabled={!files.length||busy}>{busy?'Uploading…':category==='pricing'?'Submit workbook':'Upload'}</Button></div></div>}
   <RfpFileViewer rfp={rfp} attachment={viewing} onClose={()=>setViewing(null)} onToast={onToast} canDownload={canDownload}/>
  </div>
 }

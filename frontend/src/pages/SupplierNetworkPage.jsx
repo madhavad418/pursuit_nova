@@ -13,7 +13,7 @@ const STATUS_TONE={'Ready to initiate':'neutral','Initiated':'neutral','Qualific
 
 const emptyForm={company_name:'',market:'',registration_status:'Ready to initiate',entry_route:'',public_evidence:'',suggested_approach:'',notes:''}
 
-export default function SupplierNetworkPage({onToast}){
+export default function SupplierNetworkPage({route,onToast}){
  const {has}=useAuth()
  const [data,setData]=useState(null); const [error,setError]=useState(null)
  const [statusFilter,setStatusFilter]=useState('')
@@ -25,6 +25,9 @@ export default function SupplierNetworkPage({onToast}){
  const items=(data?.items||[]).filter(x=>!statusFilter||x.registration_status===statusFilter)
  const counts=Object.fromEntries(REGISTRATION_STATUSES.map(s=>[s,(data?.items||[]).filter(x=>x.registration_status===s).length]))
  const openEdit=row=>setEditing({...row})
+ // Global search links here as supplier-network?open=<id>; open that target once the list has loaded.
+ const openId=route?.query?.get('open')
+ useEffect(()=>{if(!openId||!data)return; const r=data.items?.find(x=>String(x.id)===openId); if(r)openEdit(r)},[openId,data])
  const deleteTarget=async(e,row)=>{
   e.stopPropagation()
   if(!confirm(`Remove ${row.company_name} from the Supplier Network? This cannot be undone.`))return

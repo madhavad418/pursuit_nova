@@ -1,0 +1,44 @@
+INFO:     Started server process [34996]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+{"ts": "2026-09-24T13:28:13.289101+00:00", "event": "request", "request_id": "9e85c3c8-9a83-413c-b2e1-992f4e21c181", "path": "/openapi.json", "method": "GET", "status": 200, "latency_ms": 39.42}
+{"ts": "2026-09-24T13:28:14.632274+00:00", "event": "request", "request_id": "2b44def0-22cf-4575-8466-e6de21c85a86", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 700.41}
+{"ts": "2026-09-24T13:28:27.565506+00:00", "event": "request", "request_id": "820fc729-f8ff-403d-abc2-fbb69d658786", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 712.89}
+{"ts": "2026-09-24T13:28:29.787394+00:00", "event": "request", "request_id": "2523b1de-16c4-49fa-bd60-2d2fdb073afd", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 997.62}
+{"ts": "2026-09-24T13:28:57.591919+00:00", "event": "request", "request_id": "aba842b1-2343-43a3-8ebd-7a76a834f5f1", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 742.06}
+{"ts": "2026-09-24T13:29:27.556722+00:00", "event": "request", "request_id": "b5037cb5-4100-4ef4-8f05-591226e6a1ee", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 705.41}
+{"ts": "2026-09-24T13:29:29.519707+00:00", "event": "request", "request_id": "1b694a05-e456-44f2-ae6e-db304b73b69c", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 1042.32}
+{"ts": "2026-09-24T13:29:57.549330+00:00", "event": "request", "request_id": "2784bf95-d569-4ed8-a36e-6389d3544512", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 711.87}
+{"ts": "2026-09-24T13:30:12.311512+00:00", "event": "request", "request_id": "31509bd7-e419-42ef-925b-85fe2086cea1", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 572.84}
+{"ts": "2026-09-24T13:30:15.620081+00:00", "event": "request", "request_id": "e6cf87c3-2ed5-4624-b1ab-deb3c0a97676", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 712.19}
+{"ts": "2026-09-24T13:30:18.099041+00:00", "event": "request", "request_id": "4ef0ed34-caec-46ca-a9ba-ec41adb649ce", "path": "/api/auth/logout", "method": "POST", "status": 200, "latency_ms": 917.37}
+{"ts": "2026-09-24T13:30:22.780443+00:00", "event": "request", "request_id": "ad0d685f-2e92-4e33-afd6-fc1e5ac8e579", "path": "/api/auth/login", "method": "POST", "status": 200, "latency_ms": 1800.13}
+{"ts": "2026-09-24T13:30:23.533488+00:00", "event": "request", "request_id": "208cf98b-e453-4873-b45a-f6b212f57d36", "path": "/api/dashboard/preferences", "method": "GET", "status": 200, "latency_ms": 699.36}
+{"ts": "2026-09-24T13:30:23.816930+00:00", "event": "request", "request_id": "bd54f0e2-8a8c-41b7-988f-1021bf0ce545", "path": "/api/dashboard/preferences", "method": "GET", "status": 200, "latency_ms": 270.93}
+{"ts": "2026-09-24T13:30:24.446056+00:00", "event": "request", "request_id": "ad5e9557-1c8e-4c5e-b3f5-511a3c99fcca", "path": "/api/dashboard/attention", "method": "GET", "status": 200, "latency_ms": 1625.99}
+{"ts": "2026-09-24T13:30:25.095024+00:00", "event": "request", "request_id": "354a5ba2-c8b8-4c6c-9341-7a1d4634c48b", "path": "/api/notifications", "method": "GET", "status": 200, "latency_ms": 2257.3}
+{"ts": "2026-09-24T13:30:25.206252+00:00", "event": "request", "request_id": "826d961d-3597-4f7f-aaea-f261825f870f", "path": "/api/dashboard/analytics", "method": "GET", "status": 200, "latency_ms": 2388.31}
+{"ts": "2026-09-24T13:30:25.500067+00:00", "event": "request", "request_id": "23f29934-e41f-4b19-b49a-68a0cef0515a", "path": "/api/dashboard/attention", "method": "GET", "status": 200, "latency_ms": 1037.83}
+{"ts": "2026-09-24T13:30:25.662806+00:00", "event": "request", "request_id": "f94f2e46-8e04-43de-b097-72cb31482dff", "path": "/api/dashboard/summary", "method": "GET", "status": 200, "latency_ms": 2846.93}
+{"ts": "2026-09-24T13:30:27.218385+00:00", "event": "request", "request_id": "3e6fef33-9109-4243-a103-cc85de4c5be5", "path": "/api/dashboard/analytics", "method": "GET", "status": 200, "latency_ms": 2002.17}
+{"ts": "2026-09-24T13:30:27.431867+00:00", "event": "request", "request_id": "5a1e91d0-76bf-46a2-872a-c24a73e2f13a", "path": "/api/notifications", "method": "GET", "status": 200, "latency_ms": 2323.09}
+{"ts": "2026-09-24T13:30:27.987707+00:00", "event": "request", "request_id": "ff372dc3-7a4e-4137-973d-8c6f18d2a4a3", "path": "/api/dashboard/summary", "method": "GET", "status": 200, "latency_ms": 2311.32}
+{"ts": "2026-09-24T13:30:28.881721+00:00", "event": "request", "request_id": "5e5ab990-68d9-498c-816a-47649df3a401", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 356.47}
+{"ts": "2026-09-24T13:30:29.247369+00:00", "event": "request", "request_id": "d6973be2-5c44-4947-be72-eacca6fa5d28", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 346.92}
+{"ts": "2026-09-24T13:30:30.595910+00:00", "event": "request", "request_id": "430ada23-d84f-4731-9fbb-81412ca67fa8", "path": "/api/notifications", "method": "GET", "status": 200, "latency_ms": 2068.9}
+{"ts": "2026-09-24T13:30:59.189922+00:00", "event": "request", "request_id": "d41cd2b9-44e0-4e0a-b0bb-68b9339a6799", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 340.65}
+{"ts": "2026-09-24T13:31:29.171441+00:00", "event": "request", "request_id": "a1c7e0b3-413b-4894-a7fd-44385d76b767", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 328.15}
+{"ts": "2026-09-24T13:31:38.245769+00:00", "event": "request", "request_id": "913a95ef-4333-43b6-9e58-5c678a5571dd", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 431.83}
+{"ts": "2026-09-24T13:31:47.524597+00:00", "event": "request", "request_id": "ad44c50a-3272-4376-9d48-03e67910c587", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 703.74}
+{"ts": "2026-09-24T13:31:53.074443+00:00", "event": "request", "request_id": "eb833f44-17b9-4560-a88f-f50991ce1fe1", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 405.23}
+{"ts": "2026-09-24T13:31:58.979747+00:00", "event": "request", "request_id": "4d6deb25-5884-4390-9fc0-96069646e27c", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 459.17}
+{"ts": "2026-09-24T13:32:11.719311+00:00", "event": "request", "request_id": "38e8f460-0ea2-41e8-8b22-57d6f197c068", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 338.37}
+{"ts": "2026-09-24T13:32:19.536016+00:00", "event": "request", "request_id": "7cae8a58-4bda-4b58-af86-8a31932f85d9", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 281.44}
+{"ts": "2026-09-24T13:32:29.253312+00:00", "event": "request", "request_id": "41657d6d-029f-4d1b-b671-c4010d48bad9", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 415.47}
+{"ts": "2026-09-24T13:32:59.228614+00:00", "event": "request", "request_id": "64239398-01a7-474b-8002-c2a9c0db0e81", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 378.62}
+{"ts": "2026-09-24T13:33:28.048352+00:00", "event": "request", "request_id": "68b49081-7ec2-4798-a266-72ad86f775bf", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 345.34}
+{"ts": "2026-09-24T13:33:28.849549+00:00", "event": "request", "request_id": "f6b5d487-72d0-4bdd-aede-a2f1152924ac", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 324.36}
+{"ts": "2026-09-24T13:33:43.748112+00:00", "event": "request", "request_id": "72bfe983-08c8-4491-85e6-8878966d9cc0", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 309.76}
+{"ts": "2026-09-24T13:33:58.817879+00:00", "event": "request", "request_id": "569ed733-a507-42b4-8efb-f780ae97acd2", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 293.55}
+{"ts": "2026-09-24T13:34:31.141953+00:00", "event": "request", "request_id": "d441d3de-49bf-44b5-9851-5f3bed88c22f", "path": "/api/rfps", "method": "GET", "status": 200, "latency_ms": 2294.75}
