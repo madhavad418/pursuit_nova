@@ -34,7 +34,7 @@ class PageBoundary extends React.Component{
 const SUPPLIER_NETWORK_ONLY_EMAILS=['kmehta@jsanconsulting.com']
 // RFPs workspace is restricted to Chandrika's and Kamalakar's logins; a direct hash/URL visit is blocked for everyone
 // else so the tab is genuinely hidden, not just removed from the nav. Client-side only, per request.
-const RFP_EMAILS=['chandrika@jsan.local','kdasari@jsanconsulting.com']
+const RFP_EMAILS=['chandrikabr@jsanconsulting.com','chandrika@jsan.local','kdasari@jsanconsulting.com']
 
 function Product(){
  const {user,loading,has}=useAuth(); const route=useHashRoute(); const [toast,setToast]=useState(null)

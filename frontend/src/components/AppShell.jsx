@@ -11,7 +11,7 @@ import { Button, Modal, Empty, Spinner, Field, Input } from './UI'
 const SUPPLIER_NETWORK_EMAILS=['chandrikabr@jsanconsulting.com','kmehta@jsanconsulting.com','kdasari@jsanconsulting.com']
 const SUPPLIER_NETWORK_ONLY_EMAILS=['kmehta@jsanconsulting.com']
 // RFPs is only visible to Chandrika's and Kamalakar's logins; hidden for every other login. Client-side only, per request.
-const RFP_EMAILS=['chandrika@jsan.local','kdasari@jsanconsulting.com']
+const RFP_EMAILS=['chandrikabr@jsanconsulting.com','chandrika@jsan.local','kdasari@jsanconsulting.com']
 
 const nav=[
   ['dashboard','Dashboard','dashboard'],['prospects','Prospects','prospects','LEAD_VIEW'],['partnerships','Partnerships','partner','LEAD_VIEW'],['supplier-network','Supplier Network','network','COMPANY_VIEW'],['rfps','RFPs','rfp','COMPANY_VIEW'],['actions','Actions','actions'],['pipeline','Opportunity Pipeline','pipeline','OPPORTUNITY_VIEW'],['forecast','Forecast','forecast','FORECAST_VIEW'],['leadership','Leadership Analytics','leadership','REPORT_VIEW'],['kpi','KPI Tracker','target']
