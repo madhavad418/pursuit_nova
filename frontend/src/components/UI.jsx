@@ -4,8 +4,53 @@ import { classNames } from '../lib/format'
 
 export function Spinner({ label = 'Loading' }) { return <div className="loading-state"><span className="spinner"/><span>{label}…</span></div> }
 export function Empty({ title = 'Nothing to show', text = 'No records match this view.' }) { return <div className="empty-state"><div className="empty-icon"><Icon name="note"/></div><strong>{title}</strong><span>{text}</span></div> }
-export function Pill({ children, tone = 'neutral' }) { return <span className={`pill pill-${tone}`}>{children}</span> }
+export function Pill({ children, tone = 'neutral', className = '' }) { return <span className={`pill pill-${tone}${className ? ' ' + className : ''}`}>{children}</span> }
 export function temperatureTone(v) { return v === 'Hot' ? 'danger' : v === 'Warm' ? 'warning' : 'info' }
+// Three filled, gradient icons — not the shared outline icon set — so each temperature reads as
+// its literal thing at a glance (fire / sun / snowflake), not an abstract wiggling line shape.
+// Gradient ids are per-instance (useId) since a table can render many of the same signal at once.
+function FlameIcon({ size = 13 }) {
+  const gid = useId()
+  return <svg width={size} height={size} viewBox="0 0 24 24" className="flame-fx" aria-hidden="true">
+    <defs><linearGradient id={gid} x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stopColor="#b71c1c"/><stop offset="42%" stopColor="#ff5a1f"/><stop offset="76%" stopColor="#ffb300"/><stop offset="100%" stopColor="#ffe27a"/>
+    </linearGradient></defs>
+    <path fill={`url(#${gid})`} d="M8.5 14.5A2.5 2.5 0 0 0 11 17a2.5 2.5 0 0 0 2.5-2.5c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+  </svg>
+}
+// Wrapped in .sun-wrap so a blurred radial-gradient corona (::before, CSS) can pulse behind the
+// rays — a halo, not just an icon wiggle.
+function SunIcon({ size = 13 }) {
+  const gid = useId()
+  return <span className="sun-wrap"><svg width={size} height={size} viewBox="0 0 24 24" className="sun-fx" aria-hidden="true">
+    <defs><radialGradient id={gid} cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stopColor="#fff6c9"/><stop offset="55%" stopColor="#ffb300"/><stop offset="100%" stopColor="#ff8f00"/>
+    </radialGradient></defs>
+    <g stroke={`url(#${gid})`} strokeWidth="2.3" strokeLinecap="round"><path d="M12 1.6v2.8M12 19.6V22M4.93 4.93l1.7 1.7M17.37 17.37l1.7 1.7M1.6 12h2.8M19.6 12H22M6.63 17.37l-1.7 1.7M19.07 4.93l-1.7 1.7"/></g>
+    <circle cx="12" cy="12" r="4.6" fill={`url(#${gid})`}/>
+  </svg></span>
+}
+// A solid gradient base draws the full crystal; a second bright overlay path with a short dash
+// travels around it on a loop — a genuine sparkle-sweep, not just a wobble.
+function SnowflakeIcon({ size = 13 }) {
+  const gid = useId()
+  const d = "M12 2v20M2 12h20M20 16l-4-4 4-4M4 8l4 4-4 4M16 4l-4 4-4-4M8 20l4-4 4 4"
+  return <svg width={size} height={size} viewBox="0 0 24 24" className="snow-fx" aria-hidden="true">
+    <defs><linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stopColor="#eef9ff"/><stop offset="100%" stopColor="#3fa9e0"/>
+    </linearGradient></defs>
+    <path d={d} stroke={`url(#${gid})`} strokeWidth="2.1" strokeLinecap="round" fill="none"/>
+    <path d={d} className="snow-sparkle" stroke="#ffffff" strokeWidth="2.1" strokeLinecap="round" fill="none"/>
+  </svg>
+}
+// Each signal is a full, unmistakable treatment — its own literal icon, its own particle motion
+// (rising sparks / twinkling glints / falling flakes), and the whole pill breathing that signal's
+// color in counterpoint — never just a generic pulse. See styles.css for the keyframes.
+export function SignalPill({ value }) {
+  if (value === 'Hot') return <Pill tone="danger" className="signal-hot"><FlameIcon/><i className="spark"/><i className="spark spark-2"/>{value}</Pill>
+  if (value === 'Warm') return <Pill tone="warning" className="signal-warm"><SunIcon/><i className="glint"/><i className="glint glint-2"/>{value}</Pill>
+  return <Pill tone="info" className="signal-cold"><SnowflakeIcon/><i className="flake"/><i className="flake flake-2"/>{value}</Pill>
+}
 export function statusTone(v = '') {
   if (v.includes('Won') || v === 'Completed' || v === 'Qualified') return 'success'
   if (v.includes('Lost') || v === 'Overdue') return 'danger'

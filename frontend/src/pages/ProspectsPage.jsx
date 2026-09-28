@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { dateText } from '../lib/format'
-import { Button, Empty, ErrorBanner, Field, Input, Modal, PeoplePicker, Pagination, Pill, SectionHeader, Select, Table, TagsInput, Textarea, BulkBar, temperatureTone } from '../components/UI'
+import { Button, Empty, ErrorBanner, Field, Input, Modal, PeoplePicker, Pagination, Pill, SectionHeader, Select, Table, TagsInput, Textarea, BulkBar, SignalPill } from '../components/UI'
 import { Icon } from '../components/Icons'
 import { navigate } from '../lib/router'
 import { useAuth } from '../components/Auth'
@@ -87,7 +87,7 @@ export default function ProspectsPage({ route, onToast }) {
         ...(admin ? [{ key: '_select', label: 'Select', header: () => <input type="checkbox" className="bulk-check" aria-label="Select all prospects on this page" checked={allSelected} onChange={() => setSelected(allSelected ? [] : pageIds)} onClick={e => e.stopPropagation()} />, render: r => <input type="checkbox" className="bulk-check" aria-label={`Select ${r.company_name}`} checked={selected.includes(r.id)} onChange={() => setSelected(s => s.includes(r.id) ? s.filter(x => x !== r.id) : [...s, r.id])} onClick={e => e.stopPropagation()} /> }] : []),
         { key: 'company_name', label: 'Prospect', header: menu('Prospect', 'company_name'), render: r => <div className="primary-cell"><strong>{r.company_name}</strong><span>{r.primary_contact || 'No primary contact'} · {r.vertical}</span></div> },
         // Other columns: filter only, options are the values present in the data
-        { key: 'temperature', label: 'Signal', header: menu('Signal', null, { filterValue: filters.temperature, onFilter: filterBy('temperature'), options: (facets.temperatures || []).map(x => ({ value: x, label: x })) }), render: r => <Pill tone={temperatureTone(r.temperature)}>{r.temperature}</Pill> },
+        { key: 'temperature', label: 'Signal', header: menu('Signal', null, { filterValue: filters.temperature, onFilter: filterBy('temperature'), options: (facets.temperatures || []).map(x => ({ value: x, label: x })) }), render: r => <SignalPill value={r.temperature}/> },
         { key: 'status', label: 'Status', header: menu('Status', null, { filterValue: filters.status, onFilter: filterBy('status'), options: Array.from(new Set([...(facets.statuses || []), 'Not Engaged'])).map(x => ({ value: x, label: x })) }), render: r => <Pill tone="neutral">{r.status}</Pill> },
         { key: 'owner_name', label: 'Owner', header: menu('Owner', null, { filterValue: filters.owner_id, onFilter: filterBy('owner_id'), options: visiblePickerUsers(facets.owners || [], { hideKamalakar: true }).map(o => ({ value: o.id, label: o.name })) }), render: r => { const co = r.co_owners || []; return co.length ? <span title={[r.owner_name, ...co.map(p => p.name)].join(', ')}>{r.owner_name} <small style={{ color: 'var(--muted)' }}>+{co.length}</small></span> : r.owner_name } },
         { key: 'next_follow_up', label: 'Next follow-up', header: menu('Next follow-up', null, { filterValue: filters.followup, onFilter: filterBy('followup'), options: [...(facets.follow_ups || []).map(x => ({ value: x, label: dateText(x) })), ...(facets.has_empty_follow_up ? [{ value: 'none', label: 'No date' }] : [])] }), render: r => <span className={r.next_follow_up && r.next_follow_up < new Date().toISOString().slice(0, 10) ? 'text-danger' : ''}>{dateText(r.next_follow_up)}</span> },
