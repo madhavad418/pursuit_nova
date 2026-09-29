@@ -8,7 +8,7 @@ import { Button, Modal, Empty, Spinner, Field, Input } from './UI'
 
 // Supplier Network is only visible to these logins; Kalpesh Mehta's login is restricted to that
 // single tab (everything else hidden), both enforced client-side only.
-const SUPPLIER_NETWORK_EMAILS=['chandrikabr@jsanconsulting.com','kmehta@jsanconsulting.com','kdasari@jsanconsulting.com']
+const SUPPLIER_NETWORK_EMAILS=['chandrikabr@jsanconsulting.com','kmehta@jsanconsulting.com','kdasari@jsanconsulting.com','ssrivastava@jsanconsulting.com']
 const SUPPLIER_NETWORK_ONLY_EMAILS=['kmehta@jsanconsulting.com']
 
 const nav=[
