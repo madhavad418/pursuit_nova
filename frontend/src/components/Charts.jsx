@@ -24,8 +24,14 @@ export function HorizontalBars({ data=[], dataKey='value', nameKey='name', curre
   const yAxisWidth = Math.max(140, Math.min(longest, 40)*7 + 24)
   return <ResponsiveContainer width="100%" height={chartHeight}><BarChart data={data} layout="vertical" margin={{top:0,right:16,left:16,bottom:0}}><CartesianGrid horizontal={false} stroke={grid}/><XAxis type="number" tick={axis} axisLine={false} tickLine={false} tickFormatter={v=>currency?money(v,currency):v}/><YAxis type="category" dataKey={nameKey} width={yAxisWidth} tick={axis} axisLine={false} tickLine={false} interval={0}/><Tooltip contentStyle={tooltipStyle} labelFormatter={v=>v} formatter={v=>currency?money(v,currency,false):v}/><Bar dataKey={dataKey} fill="#0879b9" radius={[0,6,6,0]} barSize={20}/></BarChart></ResponsiveContainer>
 }
-export function Donut({ data=[], valueKey='count' }) {
+// `onSelect` makes the slices clickable — it receives the slice's name, or null when the already
+// selected slice is clicked again (so a second click clears the selection). `selected` dims the
+// other slices. Both are optional: without them the donut behaves exactly as before.
+export function Donut({ data=[], valueKey='count', onSelect, selected=null }) {
   const total=data.reduce((s,x)=>s+Number(x[valueKey]||0),0)
-  return <div className="donut-wrap"><ResponsiveContainer width="100%" height={240}><PieChart><Pie data={data} dataKey={valueKey} nameKey="name" innerRadius={68} outerRadius={96} paddingAngle={3}>{data.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie><Tooltip contentStyle={tooltipStyle}/></PieChart></ResponsiveContainer><div className="donut-center"><strong>{total}</strong><span>Total</span></div></div>
+  const shown=selected!=null?data.find(x=>x.name===selected):null
+  const centerValue=shown?Number(shown[valueKey]||0):total
+  const click=onSelect?(_,i)=>{const name=data[i]?.name; onSelect(name===selected?null:name)}:undefined
+  return <div className="donut-wrap"><ResponsiveContainer width="100%" height={240}><PieChart><Pie data={data} dataKey={valueKey} nameKey="name" innerRadius={68} outerRadius={96} paddingAngle={3} onClick={click} style={onSelect?{cursor:'pointer',outline:'none'}:undefined}>{data.map((x,i)=><Cell key={i} fill={COLORS[i%COLORS.length]} stroke={selected===x.name?'#134563':undefined} strokeWidth={selected===x.name?2:0} opacity={selected==null||selected===x.name?1:.28}/>)}</Pie><Tooltip contentStyle={tooltipStyle}/></PieChart></ResponsiveContainer><div className="donut-center"><strong>{centerValue}</strong><span>{shown?shown.name:'Total'}</span></div></div>
 }
 export function Legend({ items=[] }) { return <div className="chart-legend">{items.map((x,i)=><span key={x.name}><i style={{background:COLORS[i%COLORS.length]}}/>{x.name}<b>{x.count ?? x.value ?? ''}</b></span>)}</div> }

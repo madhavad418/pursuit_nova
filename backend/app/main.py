@@ -1811,18 +1811,32 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
     # is attributed to every tag it carries rather than one bucket keyed by the raw string.
     def vtags(v): return split_verticals(v) or ["Other"]
     verticals={}; sources={}; owners={}
+    # The lead-source donut is clickable: selecting a slice narrows the vertical and owner tables
+    # below it to that channel. The same rollups are therefore also kept per source, keyed by the
+    # exact source value the donut renders. Additive only — the flat rollups stay as they were.
+    src_verticals={}; src_owners={}
+    def sv(src): return src_verticals.setdefault(src,{})
+    def so(src): return src_owners.setdefault(src,{})
+    def vbucket(store,v): return store.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})
+    def obucket(store,name): return store.setdefault(name,{"owner":name,"opportunities":0,"pipeline":0,"won":0})
     for l in lp:
         for v in vtags(l["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["leads"]+=1
         sources.setdefault(l["source"],{"source":l["source"],"leads":0,"opportunities":0,"won":0})["leads"]+=1
+        for v in vtags(l["vertical"]): vbucket(sv(l["source"]),v)["leads"]+=1
     lmap={x["id"]:x for x in ls}
     for o in op:
-        for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["pipeline"]+=cv(o.get("amount"),o.get("currency"))
+        amount=cv(o.get("amount"),o.get("currency"))
+        for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["pipeline"]+=amount
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["opportunities"]+=1
-        owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0}); owners[o["owner_name"]]["opportunities"]+=1; owners[o["owner_name"]]["pipeline"]+=cv(o.get("amount"),o.get("currency"))
+        owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0}); owners[o["owner_name"]]["opportunities"]+=1; owners[o["owner_name"]]["pipeline"]+=amount
+        for v in vtags(o["vertical"]): vbucket(sv(src),v)["pipeline"]+=amount
+        ob=obucket(so(src),o["owner_name"]); ob["opportunities"]+=1; ob["pipeline"]+=amount
     for o in won:
         value=cv(o.get("final_amount") or o.get("amount"),o.get("currency"))
         for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["won"]+=1
+        for v in vtags(o["vertical"]): vbucket(sv(src),v)["won"]+=value
+        obucket(so(src),o["owner_name"])["won"]+=value
         owners.setdefault(o["owner_name"],{"owner":o["owner_name"],"opportunities":0,"pipeline":0,"won":0})["won"]+=value
     # Geographic aggregation for map
     region_counts={}
@@ -1841,7 +1855,9 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
             locations.setdefault(c,{"country":c,"region":ll.get("region",""),"leads":0,"opportunities":0,"pipeline":0})
             locations[c]["opportunities"]+=1
             locations[c]["pipeline"]+=cv(o.get("amount"),o.get("currency"))
-    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":sorted(sources.values(),key=lambda x:x["leads"],reverse=True),"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True),"locations":sorted(locations.values(),key=lambda x:x["leads"],reverse=True),"region_counts":[{"region":k,"leads":v} for k,v in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0]=="Unassigned",kv[0].lower()))]}
+    # Donut order and its per-source breakdown must line up, so both read from the same ranking.
+    ranked_sources=sorted(sources.values(),key=lambda x:x["leads"],reverse=True)
+    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":ranked_sources,"source_breakdown":[{"source":r["source"],"verticals":sorted(src_verticals.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True),"owners":sorted(src_owners.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True)} for r in ranked_sources],"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True),"locations":sorted(locations.values(),key=lambda x:x["leads"],reverse=True),"region_counts":[{"region":k,"leads":v} for k,v in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0]=="Unassigned",kv[0].lower()))]}
 
 @app.get("/api/admin/master-values")
 def get_masters(u=Depends(current_user)): return rows(select(master_values).where(master_values.c.active==True).order_by(master_values.c.category,master_values.c.sort_order))
