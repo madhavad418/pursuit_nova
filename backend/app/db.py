@@ -13,6 +13,34 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import insert, update, delete
 
+# Default deal currency by region/country. Anything not listed falls back to the corporate currency.
+REGION_CURRENCY={"NORTH AMERICA":"USD","USA":"USD","CANADA":"CAD","MEXICO":"MXN","LATAM":"USD","LATIN AMERICA":"USD","BRAZIL":"BRL","ARGENTINA":"ARS","CHILE":"CLP","COLOMBIA":"COP","PERU":"PEN",
+    "EUROPE":"EUR","GERMANY":"EUR","FRANCE":"EUR","NETHERLANDS":"EUR","SPAIN":"EUR","ITALY":"EUR","IRELAND":"EUR","BELGIUM":"EUR","AUSTRIA":"EUR","PORTUGAL":"EUR","FINLAND":"EUR",
+    "UK":"GBP","SWEDEN":"SEK","NORWAY":"NOK","DENMARK":"DKK","SWITZERLAND":"CHF","POLAND":"PLN","CZECH REPUBLIC":"CZK","TURKEY":"TRY","RUSSIA":"RUB",
+    "INDIA":"INR","APAC":"USD","SINGAPORE":"SGD","HONG KONG":"HKD","CHINA":"CNY","JAPAN":"JPY","SOUTH KOREA":"KRW","TAIWAN":"TWD","THAILAND":"THB","MALAYSIA":"MYR","INDONESIA":"IDR","PHILIPPINES":"PHP","VIETNAM":"VND",
+    "ANZ":"AUD","AUSTRALIA":"AUD","NEW ZEALAND":"NZD",
+    "MIDDLE EAST":"AED","UAE":"AED","SAUDI ARABIA":"SAR","QATAR":"QAR","ISRAEL":"ILS",
+    "AFRICA":"USD","SOUTH AFRICA":"ZAR","EGYPT":"EGP","NIGERIA":"NGN","KENYA":"KES","MOROCCO":"MAD"}
+
+def region_currency(region, corporate="USD"):
+    """Default currency for a prospect in `region` (first mapped entry wins for "India, UK")."""
+    for part in str(region or "").split(","):
+        code=REGION_CURRENCY.get(part.strip().upper())
+        if code: return code
+    return corporate
+
+def backfill_lead_currency(conn=None):
+    """Give every prospect without a currency its region's default (corporate when unmapped)."""
+    corp=os.getenv("CORPORATE_CURRENCY","USD").strip().upper() or "USD"
+    def run(c):
+        for (region,) in c.execute(text("SELECT DISTINCT region FROM leads WHERE currency IS NULL")).fetchall():
+            code=region_currency(region,corp)
+            if region is None: c.execute(text("UPDATE leads SET currency=:code WHERE currency IS NULL AND region IS NULL"),{"code":code})
+            else: c.execute(text("UPDATE leads SET currency=:code WHERE currency IS NULL AND region=:region"),{"code":code,"region":region})
+    if conn is not None: run(conn)
+    else:
+        with engine.begin() as c: run(c)
+
 def _load_env_file():
     """Loads backend/.env for local runs. Real environment variables (Railway, Docker, tests) always win."""
     if "pytest" in sys.modules: return  # tests configure their own throwaway database
@@ -151,6 +179,9 @@ leads = Table(
     Column("country", String(100)),
     Column("state", String(100)),
     Column("city", String(100)),
+    # The prospect's default deal currency: pre-fills new opportunities and shows on the Prospects
+    # table. Set from the region at creation when not given (see REGION_CURRENCY).
+    Column("currency", String(10)),
     Column("next_follow_up", String(10)),
     Column("remarks", Text),
     Column("created_by", ForeignKey("users.id"), nullable=False),
@@ -958,6 +989,11 @@ def _add_missing_columns():
     if "category" not in {c["name"] for c in inspect(engine).get_columns("users")}:
         with engine.begin() as c:
             c.execute(text("ALTER TABLE users ADD COLUMN category VARCHAR(80)"))
+    # Prospect default currency: nullable column, then every existing prospect gets one from its region.
+    if "currency" not in {c["name"] for c in inspect(engine).get_columns("leads")}:
+        with engine.begin() as c:
+            c.execute(text("ALTER TABLE leads ADD COLUMN currency VARCHAR(10)"))
+    backfill_lead_currency()
     # Optional "post overdue date" added after the actions boards shipped; nullable, so existing rows are untouched
     for tbl_name in ("actions", "generic_actions"):
         if "post_overdue_date" not in {c["name"] for c in inspect(engine).get_columns(tbl_name)}:
@@ -1160,12 +1196,11 @@ def _seed_settings(c):
         ])
     if c.execute(select(func.count()).select_from(fx_rates)).scalar_one() == 0:
         today_iso=date.today().isoformat()
-        c.execute(insert(fx_rates), [
-            {"currency":"USD","rate_to_corporate":1.0,"as_of":today_iso,"source":"DEFAULT","updated_by":None},
-            {"currency":"INR","rate_to_corporate":0.012,"as_of":today_iso,"source":"DEFAULT","updated_by":None},
-            {"currency":"GBP","rate_to_corporate":1.27,"as_of":today_iso,"source":"DEFAULT","updated_by":None},
-            {"currency":"EUR","rate_to_corporate":1.09,"as_of":today_iso,"source":"DEFAULT","updated_by":None},
-        ])
+        corp=os.getenv("CORPORATE_CURRENCY","USD").strip().upper() or "USD"
+        # Placeholders are expressed against USD. With another corporate currency only the base row
+        # is meaningful, so seed just that at 1.0 and let the provider refresh fill in the rest.
+        seed=[{"currency":"USD","rate_to_corporate":1.0},{"currency":"INR","rate_to_corporate":0.012},{"currency":"GBP","rate_to_corporate":1.27},{"currency":"EUR","rate_to_corporate":1.09}] if corp=="USD" else [{"currency":corp,"rate_to_corporate":1.0}]
+        c.execute(insert(fx_rates), [{**r,"as_of":today_iso,"source":"DEFAULT" if r["currency"]!=corp else "CORPORATE-BASE","updated_by":None} for r in seed])
 
     if c.execute(select(func.count()).select_from(master_values)).scalar_one() == 0:
         masters = {

@@ -1,12 +1,32 @@
+// A value of exactly `null` is a field the viewer is not allowed to see (the API masks hidden
+// fields to null), so it renders as a dash rather than as a convincing-looking zero. `undefined`
+// and 0 are genuine zeros.
 export function money(value, currency = 'USD', compact = true) {
+  if (value === null) return '—'
   const number = Number(value || 0)
+  // Legacy rows can carry "inr" or "INR " — the server normalises the same way before converting.
+  const code = String(currency || 'USD').trim().toUpperCase() || 'USD'
   try {
     return new Intl.NumberFormat('en-US', {
-      style: 'currency', currency,
+      style: 'currency', currency: code,
       maximumFractionDigits: compact ? 1 : 0,
       notation: compact ? 'compact' : 'standard'
     }).format(number)
-  } catch { return `${currency} ${number.toLocaleString()}` }
+  } catch {
+    // Not an ISO code (e.g. "RS"): label it plainly, honouring compact so it sits next to the others.
+    const body = compact ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(number) : number.toLocaleString('en-US')
+    return `${code} ${body}`
+  }
+}
+// The symbol for a currency code ("₹" for INR, "$" for USD, "AED" when the code has no symbol), for
+// labels that show a code next to its sign. Unknown codes come back as themselves.
+export function currencySymbol(currency) {
+  const code = String(currency || '').trim().toUpperCase()
+  if (!code) return ''
+  try {
+    const part = new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: 'narrowSymbol' }).formatToParts(1).find(p => p.type === 'currency')
+    return part ? part.value : code
+  } catch { return code }
 }
 // Date and time in the viewer's own time zone, e.g. "16 Sept 2026, 4:45 pm". Expects an ISO timestamp with a zone (…Z).
 export function dateTimeText(value) {

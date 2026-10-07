@@ -36,6 +36,13 @@ export default function AdminPage({onToast}){
  useEffect(()=>{load()},[])
  const roles=roleData?.roles||[]; const assignable=roles.filter(r=>r.assignable)
  const fail=err=>onToast?.({type:'error',message:err.message})
+ // Exchange rates come from the provider named in `currency.provider`; without a key configured
+ // they stay on whatever was last entered by hand, so the panel says which situation you are in.
+ const [fxBusy,setFxBusy]=useState(false)
+ const refreshRates=async()=>{setFxBusy(true);try{const r=await api.post('/api/admin/currency/refresh',{});setCurrency(r)
+   const n=r.refresh?.updated?.length||0; const miss=r.refresh?.unsupported||[]
+   onToast?.({type:'success',message:`${n} rate${n===1?'':'s'} updated from ${r.refresh?.provider} (${r.refresh?.as_of})${miss.length?` · not quoted: ${miss.join(', ')}`:''}`})
+ }catch(e){fail(e)}finally{setFxBusy(false)}}
  const setU=(k,v)=>setUserForm(f=>({...f,[k]:v})); const setR=(k,v)=>setRoleForm(f=>({...f,[k]:v}))
 
  const openNewUser=()=>{setUserForm({...NEW_USER,role:assignable[0]?.name||'',manager_id:user.id});setUserModal('create')}
@@ -74,6 +81,7 @@ export default function AdminPage({onToast}){
 
  return <><SectionHeader eyebrow="Platform governance" title="Admin Center" text={isSuper?'You can see and manage every organisation, user and role.':'You manage the users and roles in your own organisation. Other admins’ teams are not visible to you.'}/><ErrorBanner error={error} onRetry={load}/>
  <div className="admin-grid"><article className="panel admin-status"><h3>Corporate currency</h3><strong>{currency?.corporate_currency||'—'}</strong><p>Leadership forecasts normalize original deal values into the corporate reporting currency.</p></article></div>
+ <section className="panel table-panel fx-rates"><div className="inline-head"><div><h3>Exchange rates</h3><p>{currency?.provider?.configured?`Live from ${currency.provider.name}${currency.provider.auto_refresh?' · pulled once a day when the service starts':''}.`:'No provider key configured — rates stay as last entered by hand. Set EXCHANGERATE_API_KEY to pull them live.'}</p></div>{currency?.provider?.configured&&(has('TARGET_EDIT')||has('ROLE_ADMIN'))&&<Button variant="soft" icon="refresh" onClick={refreshRates} disabled={fxBusy}>{fxBusy?'Refreshing…':'Refresh rates now'}</Button>}</div>{currency?.warning&&<div className="warning-callout stacked"><strong>Placeholder rates still in use</strong><span>{currency.warning} Affected: {(currency.stale_rates||[]).join(', ')}.</span></div>}<Table keyField="currency" rows={currency?.rates||[]} columns={[{key:'currency',label:'Currency'},{key:'rate_to_corporate',label:`1 unit in ${currency?.corporate_currency||'USD'}`,align:'right',render:r=>Number(r.rate_to_corporate).toFixed(6)},{key:'as_of',label:'As of'},{key:'source',label:'Source'}]}/></section>
  {has('USER_ADMIN')&&<section className="panel table-panel"><div className="inline-head"><div><h3>Users & reporting hierarchy</h3><p>A user sees their own work and the work of everyone who reports to them. Peers cannot see each other’s work.</p></div><Button icon="plus" onClick={openNewUser} disabled={!assignable.length}>Add user</Button></div><Table columns={userCols} rows={users}/></section>}
  <section className="panel table-panel"><div className="inline-head"><div><h3>Roles</h3><p>{isSuper?'Shared roles are available to every admin. Roles an admin creates stay inside that admin’s organisation.':'Create roles for your team. Shared roles are maintained by Super Admins.'}</p></div><Button icon="plus" onClick={openNewRole}>New role</Button></div><Table columns={roleCols} rows={roles}/></section>
 

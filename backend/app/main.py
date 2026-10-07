@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import struct
+import threading
 import time
 import logging
 import uuid
@@ -40,7 +41,7 @@ except Exception:
 
 from app.db import (
     engine, init_db, hash_password, verify_password, normalize_name, normalize_email, domain_from_url, classify_vertical, split_verticals,
-    rows, row, execute,
+    rows, row, execute, region_currency,
     roles, permissions, role_permissions, users, companies, contacts, leads, meetings, moms, actions,
     opportunities, followups, opportunity_team, targets, documents, record_shares, notifications,
     workflow_rules, master_values, audit_logs, security_logs, revoked_sessions,
@@ -68,6 +69,11 @@ MICROSOFT_REDIRECT_URI=os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:800
 MICROSOFT_SCOPES=os.getenv("MICROSOFT_SCOPES", "openid profile offline_access User.Read Mail.Send Calendars.ReadWrite OnlineMeetings.ReadWrite")
 INTEGRATION_ENCRYPTION_KEY=os.getenv("INTEGRATION_ENCRYPTION_KEY", "")
 METRICS_TOKEN=os.getenv("METRICS_TOKEN", "")
+# exchangerate-api.com supplies the corporate-currency rates. Without a key the app still runs —
+# rates then stay whatever an admin last entered by hand.
+EXCHANGERATE_API_KEY=os.getenv("EXCHANGERATE_API_KEY", "").strip()
+EXCHANGERATE_API_URL=os.getenv("EXCHANGERATE_API_URL", "https://v6.exchangerate-api.com/v6").rstrip("/")
+FX_AUTO_REFRESH=os.getenv("FX_AUTO_REFRESH", "true").lower()=="true"
 OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 # Only this login may retrieve (preview or download) uploaded RFP documents; every other user can see
 # that a document exists but cannot pull its bytes. Configurable for hand-over without a code change.
@@ -89,6 +95,9 @@ async def lifespan(app):
     init_db(create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower() == "true")
     global _HAS_CATEGORY
     _HAS_CATEGORY = _user_has_category()
+    # One provider call per start, and only when the stored rates predate today. Runs off-thread so
+    # a slow or unreachable provider can never hold up the boot or fail the health check.
+    threading.Thread(target=auto_refresh_fx_rates, daemon=True).start()
     yield
 
 app = FastAPI(title=f"{APP_NAME} API", version=APP_VERSION, lifespan=lifespan)
@@ -141,6 +150,7 @@ class Payload(BaseModel):
 LOGIN_ATTEMPTS: dict[str, deque] = defaultdict(deque)
 REQUEST_METRICS={"requests":0,"errors":0,"latency_ms_total":0.0,"started_at":time.time()}
 logger=logging.getLogger("pursuitnova")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO line echoes request URLs, and the FX key is in one
 if not logger.handlers:
     h=logging.StreamHandler(); h.setFormatter(logging.Formatter('%(message)s')); logger.addHandler(h); logger.setLevel(logging.INFO)
 MS_OAUTH_STATE: dict[str, tuple[int,float]] = {}
@@ -278,13 +288,191 @@ def ensure_fields_editable(u, entity_type:str, data:dict):
 
 def corporate_currency(): return org_setting("corporate_currency","USD")
 
+def norm_currency(value):
+    """One canonical spelling for a currency code, used on BOTH sides of every rate lookup.
+
+    `opportunities.currency` is free text — the create/update endpoints store whatever the caller
+    sends — so real records carry values like "inr" or "INR " (trailing space). Those missed the
+    rate table entirely, and because every dashboard call site turns the resulting None into 0 the
+    opportunity silently read as zero value, which looks exactly like the record disappearing.
+    """
+    code=str(value or "").strip().upper()
+    return CURRENCY_ALIASES.get(code, code)
+
+# What people actually type into a free-text currency field. Resolved before any lookup or write.
+CURRENCY_ALIASES={"RS":"INR","RS.":"INR","RUPEE":"INR","RUPEES":"INR","\u20b9":"INR","$":"USD","US$":"USD","USD$":"USD","DOLLAR":"USD","DOLLARS":"USD",
+    "\u00a3":"GBP","POUND":"GBP","POUNDS":"GBP","\u20ac":"EUR","EURO":"EUR","EUROS":"EUR","DIRHAM":"AED","DIRHAMS":"AED","DHS":"AED"}
+
+def money_value(value, field="amount", required=False):
+    """Parse a money field from a request: a finite, non-negative number, or a 400.
+
+    `float("1e999")` is `inf`, and one stored `inf` makes every endpoint that serialises the row
+    raise (FastAPI refuses non-finite JSON) - a single bad POST used to 500 the dashboard for
+    everyone in scope. Strings like "50k$" used to surface as a 500 from the DB bind instead of a 400.
+    """
+    if value is None or value=="":
+        if required: raise HTTPException(400,f"{field} is required")
+        return None
+    try: n=float(value)
+    except (TypeError,ValueError): raise HTTPException(400,f"{field} must be a number")
+    if n!=n or n in (float("inf"),float("-inf")): raise HTTPException(400,f"{field} must be a finite number")
+    if n<0: raise HTTPException(400,f"{field} cannot be negative")
+    return n
+
+def won_amount(o):
+    """Closed-won value: the final amount when one was recorded, else the opportunity amount.
+    `is not None` rather than `or`, so a deal genuinely closed at 0 is 0, not its pre-close amount."""
+    fa=o.get("final_amount")
+    return fa if fa is not None else o.get("amount")
+
+def iso_date(value):
+    """The ISO date in `value`, or None when it is not one (as_of used to be free text)."""
+    try: return date.fromisoformat(str(value or "")[:10]).isoformat()
+    except ValueError: return None
+
 def fx_map():
-    return {r["currency"]:float(r["rate_to_corporate"]) for r in rows(select(fx_rates))}
+    out={}
+    for r in rows(select(fx_rates)):
+        code=norm_currency(r["currency"])
+        # `fx_rates.currency` is unique case-sensitively, so "INR" and "inr" can both exist. Let the
+        # already-canonical row win so the map is deterministic whatever order the rows arrive in.
+        if code not in out or r["currency"]==code: out[code]=float(r["rate_to_corporate"])
+    return out
 
 def to_corporate(amount, currency, rates=None):
-    rates=rates or fx_map(); cur=(currency or corporate_currency()).upper(); rate=rates.get(cur)
+    rates=rates or fx_map(); cur=norm_currency(currency) or norm_currency(corporate_currency()); rate=rates.get(cur)
     if rate is None: return None
     return float(amount or 0)*rate
+
+FX_PROVIDER="exchangerate-api.com"
+
+def fx_provider_configured(): return bool(EXCHANGERATE_API_KEY)
+
+def fetch_fx_quotes(base):
+    """Live quotes for `base` from exchangerate-api.com, as {CODE: units per 1 base}.
+
+    The key is part of the request path, so provider errors are reported by exception class only —
+    never by echoing the URL or the provider's raw message, either of which can carry the key.
+    """
+    if not fx_provider_configured(): raise HTTPException(409,"Set EXCHANGERATE_API_KEY to refresh rates from the provider")
+    try:
+        with httpx.Client(timeout=20) as client:
+            r=client.get(f"{EXCHANGERATE_API_URL}/{EXCHANGERATE_API_KEY}/latest/{base}")
+            if r.status_code==403: raise HTTPException(502,f"{FX_PROVIDER} rejected the API key")
+            if r.status_code==429: raise HTTPException(502,f"{FX_PROVIDER} request quota is exhausted")
+            r.raise_for_status(); d=r.json()
+    except HTTPException: raise
+    except httpx.HTTPError as e: raise HTTPException(502,f"{FX_PROVIDER} unreachable ({e.__class__.__name__})")
+    except ValueError: raise HTTPException(502,f"{FX_PROVIDER} returned a malformed response")
+    if d.get("result")!="success": raise HTTPException(502,f"{FX_PROVIDER} returned an error: {d.get('error-type','unknown')}")
+    quotes={}
+    for k,v in (d.get("conversion_rates") or {}).items():
+        try: q=float(v)
+        except (TypeError,ValueError): continue  # a non-numeric quote is simply not offered
+        if q==q and q not in (float("inf"),float("-inf")) and q>0: quotes[norm_currency(k)]=q
+    if not quotes: raise HTTPException(502,f"{FX_PROVIDER} returned no rates")
+    if norm_currency(d.get("base_code"))!=norm_currency(base): raise HTTPException(502,f"{FX_PROVIDER} answered for a different base currency")
+    as_of=str(d.get("time_last_update_utc") or "")
+    try: as_of=datetime.strptime(as_of[:16].strip(),"%a, %d %b %Y").date().isoformat()
+    except ValueError: as_of=today_str()
+    return quotes,as_of
+
+def currencies_in_use():
+    """Every currency the data actually references, so a refresh covers exactly what is needed.
+
+    Keeping this to currencies in play (rather than all 160+ the provider quotes) means the rate
+    table stays reviewable, and a newly used currency picks up a rate on the next refresh.
+    """
+    out=set(fx_map()); out.add(norm_currency(corporate_currency()))
+    for col in (opportunities.c.currency, partner_opportunities.c.currency, targets.c.currency, leads.c.currency):
+        out|={norm_currency(r["currency"]) for r in rows(select(col).distinct())}
+    corp=norm_currency(corporate_currency())
+    for r in rows(select(users.c.region).where(users.c.active==True).distinct()):  # people's assigned regions
+        out|={region_currency(x.strip(),corp) for x in str(r.get("region") or "").split(",") if x.strip()}
+    return {c for c in out if c}
+
+FX_LOCK=threading.Lock()  # the boot thread and an admin click must not interleave their upserts
+MANUAL_SOURCES=("MANUAL","TREASURY")
+
+def refresh_fx_rates(user_id=None, quotes=None, as_of=None, override_manual=False):
+    """Pull live rates and store them as `rate_to_corporate`.
+
+    The provider quotes base->target (1 USD = 96.467 INR); this table holds the inverse - what one
+    unit of a currency is worth in the corporate currency - so each quote is reciprocated.
+    A rate an admin entered by hand (source MANUAL/TREASURY) is treated as approved and left alone
+    unless `override_manual` is set; it is reported under `kept_manual`.
+    """
+    corp=norm_currency(corporate_currency())
+    if quotes is None: quotes,as_of=fetch_fx_quotes(corp)
+    with FX_LOCK:
+        manual={r["currency"] for r in rows(select(fx_rates.c.currency,fx_rates.c.source)) if r.get("source") in MANUAL_SOURCES} if not override_manual else set()
+        updated=[]; unsupported=[]; kept=[]
+        for code in sorted(currencies_in_use()):
+            if code in manual and code!=corp: kept.append(code); continue
+            if code==corp: rate=1.0
+            else:
+                quote=quotes.get(code)
+                if not quote: unsupported.append(code); continue
+                rate=1.0/quote
+            vals={"rate_to_corporate":rate,"as_of":as_of,"source":FX_PROVIDER if code!=corp else "CORPORATE-BASE","updated_by":user_id,"updated_at":utcnow()}
+            ex=row(select(fx_rates.c.id).where(fx_rates.c.currency==code))
+            if ex: execute(update(fx_rates).where(fx_rates.c.id==ex["id"]).values(**vals))
+            else: execute(insert(fx_rates).values(currency=code,**vals))
+            updated.append(code)
+    return {"provider":FX_PROVIDER,"base":corp,"as_of":as_of,"updated":updated,"unsupported":unsupported,"kept_manual":kept}
+
+def auto_refresh_fx_rates():
+    """Best-effort refresh at startup, at most once a day. Never allowed to break the boot."""
+    try:
+        if not (FX_AUTO_REFRESH and fx_provider_configured()): return
+        stored=rows(select(fx_rates.c.as_of,fx_rates.c.source))
+        newest=max([iso_date(r["as_of"]) for r in stored if iso_date(r.get("as_of"))], default="")
+        # Seeded placeholders carry today's date, so freshness alone would skip them forever.
+        placeholders=any(r.get("source") in ("DEFAULT","DEMO-SEED") for r in stored)
+        unrated=currencies_in_use()-set(fx_map())  # a currency first used today, before any boot
+        today_utc=datetime.now(timezone.utc).date().isoformat()  # the provider stamps UTC dates
+        if newest>=today_utc and not placeholders and not unrated: return
+        result=refresh_fx_rates(); audit(None,"currency",None,"AUTO-REFRESH",result)
+        logger.info("fx auto-refresh: %s", result)
+    except Exception as e:
+        logger.warning("fx auto-refresh skipped: %s", e.__class__.__name__)
+
+def region_currency_breakdown(lead_list, opp_list, rates):
+    """Pipeline and won totals per region, each kept in the opportunity's OWN currency.
+
+    Leadership asked for region-wise native currency rather than one blended corporate figure, so
+    nothing here is converted: a deal booked in INR is reported in INR under its region. That is
+    also what keeps an opportunity visible when its currency has no rate row — it reports its real
+    amount instead of silently reading as zero. A `*_corporate` total is filled in only when every
+    currency carrying value in that region converts, so a partial sum is never shown as a whole one.
+
+    Region lives on the lead, not the opportunity, so it is resolved through `lead_list`.
+    """
+    lmap={l["id"]:l for l in lead_list}
+    fallback=norm_currency(corporate_currency())  # read once, not per opportunity
+    buckets={}
+    for o in opp_list:
+        region=(lmap.get(o.get("lead_id"),{}).get("region") or "").strip() or "Unassigned"
+        cur=norm_currency(o.get("currency")) or fallback
+        leg=buckets.setdefault(region,{}).setdefault(cur,{"currency":cur,"pipeline":0.0,"won":0.0,"opportunities":0})
+        leg["opportunities"]+=1
+        status=str(o.get("status") or "")
+        if status=="Closed Won": leg["won"]+=float(won_amount(o) or 0)
+        elif not status.startswith("Closed "): leg["pipeline"]+=float(o.get("amount") or 0)
+    out=[]
+    for region,by_currency in buckets.items():
+        legs=sorted(by_currency.values(), key=lambda x:(-(x["pipeline"]+x["won"]), x["currency"]))
+        for leg in legs: leg["convertible"]=leg["currency"] in rates
+        def corporate(key, legs=legs):
+            # Only a currency actually carrying value can make the total incomplete.
+            if any(not leg["convertible"] and leg[key] for leg in legs): return None
+            return round(sum(rates.get(leg["currency"],0)*leg[key] for leg in legs),2)
+        out.append({"region":region,
+            "opportunities":sum(leg["opportunities"] for leg in legs),
+            "currencies":[{**leg,"pipeline":round(leg["pipeline"],2),"won":round(leg["won"],2)} for leg in legs],
+            "pipeline_corporate":corporate("pipeline"),"won_corporate":corporate("won"),
+            "unconvertible":[leg["currency"] for leg in legs if not leg["convertible"]]})
+    return sorted(out, key=lambda x:(-x["opportunities"], x["region"]))
 
 def fernet():
     key=INTEGRATION_ENCRYPTION_KEY.strip()
@@ -930,7 +1118,7 @@ def create_lead_full(p:Payload,u=Depends(require_csrf)):
         dups=duplicate_companies(comp["name"],comp.get("website"))
         if dups and dups[0]["score"]>=0.75: raise HTTPException(409,f"Potential duplicate company: {dups[0]['company']['name']}. Select the existing company.")
         company_id=execute(insert(companies).values(name=comp["name"].strip(),normalized_name=normalize_name(comp["name"]),vertical=classify_vertical(comp["vertical"]),website=comp.get("website"),domain=domain_from_url(comp.get("website")),linkedin_url=comp.get("linkedin_url"),external_url=comp.get("external_url"),region=comp.get("region") or l.get("region"),country=comp.get("country") or l.get("country"),state=comp.get("state") or l.get("state"),city=comp.get("city") or l.get("city"),remarks=comp.get("remarks"),status="Active",created_by=u["id"]))
-    lead_id=execute(insert(leads).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
+    lead_id=execute(insert(leads).values(company_id=company_id,owner_id=owner_id,temperature=l.get("temperature") or "Warm",source=l.get("source") or "LinkedIn",source_detail=l.get("source_detail"),status=l.get("status") or "New",region=l.get("region"),country=l.get("country"),state=l.get("state"),city=l.get("city"),currency=norm_currency(l.get("currency")) or region_currency(l.get("region"),norm_currency(corporate_currency())),next_follow_up=l.get("next_follow_up"),remarks=l.get("remarks"),created_by=u["id"]))
     if co_owner_ids: apply_people(u,"lead",lead_id,co_owner_ids,[])
     for idx,ct in enumerate(d.get("contacts") or []):
         if ct.get("name"):
@@ -996,7 +1184,8 @@ def lead_detail(lead_id:int,u=Depends(require_perm("LEAD_VIEW"))):
 @app.put("/api/leads/{lead_id}")
 def update_lead(lead_id:int,p:Payload,u=Depends(require_csrf)):
     if not can_edit_lead(u,lead_id): raise HTTPException(403,"You cannot edit this lead")
-    d=p.data; vals={k:d[k] for k in ("temperature","source","source_detail","status","region","country","state","city","next_follow_up","remarks") if k in d}
+    d=p.data; vals={k:d[k] for k in ("temperature","source","source_detail","status","region","country","state","city","currency","next_follow_up","remarks") if k in d}
+    if "currency" in vals: vals["currency"]=norm_currency(vals["currency"]) or region_currency(vals.get("region") or (row(select(leads.c.region).where(leads.c.id==lead_id)) or {}).get("region"),norm_currency(corporate_currency()))
     if "temperature" in vals and vals["temperature"] not in LEAD_TEMPERATURES: raise HTTPException(400,"Signal must be Hot, Warm or Cold")
     if "status" in vals and vals["status"] not in LEAD_STATUSES: raise HTTPException(400,"Invalid prospect status")
     if "source" in vals:
@@ -1451,11 +1640,11 @@ def opportunity_detail(opp_id:int,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
 @app.post("/api/leads/{lead_id}/opportunities")
 def add_opportunity(lead_id:int,p:Payload,u=Depends(require_csrf)):
     if "OPPORTUNITY_EDIT" not in u["permissions"] or not can_view_lead(u,lead_id): raise HTTPException(403,"Opportunity permission denied")
-    d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(leads.c.company_id,leads.c.owner_id).where(leads.c.id==lead_id)); owner=int(d.get("owner_id") or l["owner_id"])
+    d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(leads.c.company_id,leads.c.owner_id,leads.c.currency).where(leads.c.id==lead_id)); owner=int(d.get("owner_id") or l["owner_id"])
     if not can_assign(u,owner): raise HTTPException(403,"You cannot assign this opportunity to that user")
     if not d.get("name"): raise HTTPException(400,"Opportunity name is required")
-    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=float(d.get("amount") or 0); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
-    oid=execute(insert(opportunities).values(lead_id=lead_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=d.get("currency") or "USD",probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
+    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
+    oid=execute(insert(opportunities).values(lead_id=lead_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=norm_currency(d.get("currency")) or norm_currency(l.get("currency")) or norm_currency(corporate_currency()),probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
     if d.get("presales_owner_id"):
         execute(insert(opportunity_team).values(opportunity_id=oid,user_id=int(d["presales_owner_id"]),team_role="Presales Owner",created_by=u["id"]))
     execute(update(leads).where(leads.c.id==lead_id).values(status="Qualified",updated_at=utcnow())); audit(u["id"],"opportunity",oid,"CREATE",d); return opportunity_detail(oid,u)
@@ -1470,6 +1659,9 @@ def update_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
     if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
+    if "currency" in vals: vals["currency"]=norm_currency(vals["currency"]) or norm_currency(corporate_currency())
+    if "amount" in vals: vals["amount"]=money_value(vals["amount"]) or 0.0
+    if "final_amount" in vals: vals["final_amount"]=money_value(vals["final_amount"],"final_amount")
     amount=float(vals.get("amount",old["amount"]) or 0); prob=float(vals.get("probability",old["probability"]) or 0); vals["weighted_value"]=amount*prob/100
     if "forecast_category" not in d and "status" in d: vals["forecast_category"]=forecast_from_status(status)
     vals["closed_at"]=today_str() if status.startswith("Closed ") else None; vals["updated_at"]=utcnow(); execute(update(opportunities).where(opportunities.c.id==opp_id).values(**vals))
@@ -1516,8 +1708,8 @@ def upsert_target(p:Payload,u=Depends(require_csrf)):
     d=p.data; uid=int(d["user_id"]); year=int(d.get("year") or date.today().year); quarter=d.get("quarter") or q_current(); amount=float(d.get("target_amount") or 0)
     if uid not in scope_user_ids(u): raise HTTPException(403,"You can only set targets for users in your hierarchy")
     ex=row(select(targets.c.id).where(and_(targets.c.user_id==uid,targets.c.year==year,targets.c.quarter==quarter)))
-    if ex: execute(update(targets).where(targets.c.id==ex["id"]).values(target_amount=amount,currency=d.get("currency") or "USD",updated_at=utcnow())); tid=ex["id"]
-    else: tid=execute(insert(targets).values(user_id=uid,year=year,quarter=quarter,currency=d.get("currency") or "USD",target_amount=amount,created_by=u["id"]))
+    if ex: execute(update(targets).where(targets.c.id==ex["id"]).values(target_amount=amount,currency=norm_currency(d.get("currency")) or norm_currency(corporate_currency()),updated_at=utcnow())); tid=ex["id"]
+    else: tid=execute(insert(targets).values(user_id=uid,year=year,quarter=quarter,currency=norm_currency(d.get("currency")) or norm_currency(corporate_currency()),target_amount=amount,created_by=u["id"]))
     audit(u["id"],"target",tid,"UPSERT",d); return {"ok":True,"id":tid}
 
 def quarter_range(year:int,q:str):
@@ -1528,7 +1720,7 @@ def forecast_summary(year:int=Query(default=date.today().year),quarter:str=Query
     start,end=quarter_range(year,quarter); visible=scope_user_ids(u); os_=opportunity_rows(u); data=[]; rates=fx_map(); corp=corporate_currency(); missing=set()
     def cv(v,c):
         x=to_corporate(v,c,rates)
-        if x is None: missing.add(c or corp); return 0.0
+        if x is None: missing.add(norm_currency(c) or corp); return 0.0
         return x
     # Names, roles and targets for everyone in scope, fetched once rather than per user.
     people={r["id"]:r for r in rows(select(users.c.id,users.c.name,roles.c.name.label("role")).select_from(users.join(roles,users.c.role_id==roles.c.id)).where(users.c.id.in_(visible)))} if visible else {}
@@ -1542,7 +1734,7 @@ def forecast_summary(year:int=Query(default=date.today().year),quarter:str=Query
         pipeline=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Pipeline")
         best=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Best Case")
         commit=sum(cv(o.get("amount"),o.get("currency")) for o in mine_open if o.get("forecast_category")=="Commit")
-        won=sum(cv(o.get("final_amount") or o.get("amount"),o.get("currency")) for o in mine_won)
+        won=sum(cv(won_amount(o),o.get("currency")) for o in mine_won)
         ta=cv(target["target_amount"],target["currency"]); data.append({"user_id":uid,"user_name":su["name"],"role":su["role"],"currency":corp,"target":round(ta,2),"target_original":float(target["target_amount"] or 0),"target_original_currency":target["currency"],"pipeline":round(pipeline,2),"best_case":round(best,2),"commit":round(commit,2),"closed_won":round(won,2),"achievement_pct":round(won/ta*100,1) if ta else 0})
     total={k:round(sum(float(x[k]) for x in data),2) for k in ("target","pipeline","best_case","commit","closed_won")}
     total["achievement_pct"]=round(total["closed_won"]/total["target"]*100,1) if total["target"] else 0
@@ -1555,13 +1747,14 @@ def dashboard(u=Depends(current_user)):
     fc={"Pipeline":0,"Best Case":0,"Commit":0,"Closed":0}
     for o in os_: fc[o.get("forecast_category") or forecast_from_status(o["status"])]=fc.get(o.get("forecast_category"),0)+cv(o)
     tg=forecast_summary(date.today().year,q_current(),u)["total"] if "FORECAST_VIEW" in u["permissions"] else {"target":0,"closed_won":0,"achievement_pct":0}
-    return {"currency":corp,"scope":"All Business" if u["scope_type"]=="all" else ("My Team" if u["scope_type"]=="team" else "My Business"),"active_leads":len([l for l in ls if l["status"] not in ("Converted","Disqualified","Lost")]),"hot_leads":len([l for l in ls if l["temperature"]=="Hot"]),"active_opportunities":len(active),"pipeline_value":round(sum(cv(o) for o in active),2),"weighted_pipeline":round(sum((to_corporate(o.get("weighted_value"),o.get("currency"),rates) or 0) for o in active),2),"best_case":round(fc.get("Best Case",0),2),"commit":round(fc.get("Commit",0),2),"actions_due_today":len([a for a in acts if a["status"] not in ("Completed","Cancelled") and a["due_date"]==t]),"overdue_actions":len([a for a in acts if a.get("overdue")]),"followups_due":len([o for o in active if o.get("next_follow_up_date") and o["next_follow_up_date"]<=t]),"closed_won_value":round(sum(to_corporate(o.get("final_amount") or o.get("amount"),o.get("currency"),rates) or 0 for o in won),2),"closed_won_count":len(won),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0,"target":tg.get("target",0),"achievement_pct":tg.get("achievement_pct",0)}
+    missing=sorted({(norm_currency(o.get("currency")) or norm_currency(corp)) for o in os_ if (norm_currency(o.get("currency")) or norm_currency(corp)) not in rates})
+    return {"currency":corp,"missing_fx_rates":missing,"scope":"All Business" if u["scope_type"]=="all" else ("My Team" if u["scope_type"]=="team" else "My Business"),"active_leads":len([l for l in ls if l["status"] not in ("Converted","Disqualified","Lost")]),"hot_leads":len([l for l in ls if l["temperature"]=="Hot"]),"active_opportunities":len(active),"pipeline_value":round(sum(cv(o) for o in active),2),"weighted_pipeline":round(sum((to_corporate(o.get("weighted_value"),o.get("currency"),rates) or 0) for o in active),2),"best_case":round(fc.get("Best Case",0),2),"commit":round(fc.get("Commit",0),2),"actions_due_today":len([a for a in acts if a["status"] not in ("Completed","Cancelled") and a["due_date"]==t]),"overdue_actions":len([a for a in acts if a.get("overdue")]),"followups_due":len([o for o in active if o.get("next_follow_up_date") and o["next_follow_up_date"]<=t]),"closed_won_value":round(sum(to_corporate(won_amount(o),o.get("currency"),rates) or 0 for o in won),2),"closed_won_count":len(won),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0,"target":tg.get("target",0),"achievement_pct":tg.get("achievement_pct",0)}
 
 @app.get("/api/dashboard/pipeline")
 def pipeline(u=Depends(current_user)):
-    groups={}
+    groups={}; rates=fx_map(); corp=corporate_currency()
     for o in opportunity_rows(u):
-        g=groups.setdefault(o["status"],{"status":o["status"],"count":0,"value":0,"currency":corporate_currency()}); g["count"]+=1; g["value"]+=to_corporate(o.get("amount"),o.get("currency")) or 0
+        g=groups.setdefault(o["status"],{"status":o["status"],"count":0,"value":0,"currency":corp}); g["count"]+=1; g["value"]+=to_corporate(o.get("amount"),o.get("currency"),rates) or 0
     return list(groups.values())
 
 @app.get("/api/dashboard/attention")
@@ -1616,7 +1809,7 @@ def dashboard_analytics(u=Depends(current_user)):
         name=o.get("owner_name") or "Unassigned"; r=owner.setdefault(name,{"owner":name,"pipeline":0,"won":0,"opportunities":0,"commit":0})
         r["opportunities"]+=1
         if not str(o.get("status") or "").startswith("Closed "): r["pipeline"]+=cv(o)
-        if o.get("status")=="Closed Won": r["won"]+=to_corporate(o.get("final_amount") or o.get("amount"),o.get("currency"),rates) or 0
+        if o.get("status")=="Closed Won": r["won"]+=to_corporate(won_amount(o),o.get("currency"),rates) or 0
         if o.get("forecast_category")=="Commit": r["commit"]+=cv(o)
     owner_performance=sorted(owner.values(), key=lambda x:(x["pipeline"]+x["won"]), reverse=True)[:8]
 
@@ -1627,15 +1820,23 @@ def dashboard_analytics(u=Depends(current_user)):
         idx=(today.year*4 + (current_q-1))-offset; y=idx//4; q=idx%4+1; start,end=quarter_range(y,f"Q{q}")
         created=[o for o in os_ if o.get("created_at") and start.isoformat()<=str(o["created_at"])[:10]<end.isoformat()]
         won=[o for o in os_ if o.get("status")=="Closed Won" and o.get("closed_at") and start.isoformat()<=o["closed_at"]<end.isoformat()]
-        periods.append({"period":f"Q{q} {str(y)[2:]}","pipeline":sum(cv(o) for o in created),"won":sum(to_corporate(o.get("final_amount") or o.get("amount"),o.get("currency"),rates) or 0 for o in won),"opportunities":len(created)})
+        periods.append({"period":f"Q{q} {str(y)[2:]}","pipeline":sum(cv(o) for o in created),"won":sum(to_corporate(won_amount(o),o.get("currency"),rates) or 0 for o in won),"opportunities":len(created)})
 
     # Work execution
     action_status={}
     for a in acts:
         k="Overdue" if a.get("overdue") else (a.get("status") or "Other"); action_status[k]=action_status.get(k,0)+1
     action_mix=[{"name":k,"count":v} for k,v in action_status.items()]
-    top_opps=[{"id":o["id"],"company":o["company_name"],"name":o["name"],"owner":o["owner_name"],"status":o["status"],"value":cv(o),"close_date":o.get("expected_close_date"),"forecast":o.get("forecast_category")} for o in sorted([x for x in os_ if not str(x.get("status") or "").startswith("Closed ")], key=lambda x:float(x.get("amount") or 0), reverse=True)[:6]]
-    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps}
+    top_opps=[{"id":o["id"],"company":o["company_name"],"name":o["name"],"owner":o["owner_name"],"status":o["status"],"value":cv(o),"close_date":o.get("expected_close_date"),"forecast":o.get("forecast_category")} for o in sorted([x for x in os_ if not str(x.get("status") or "").startswith("Closed ")], key=cv, reverse=True)[:6]]
+    # Region-wise native currency, plus an explicit account of anything the corporate-currency
+    # figures above could not convert — those used to be folded in as a silent zero.
+    region_currency=region_currency_breakdown(ls,os_,rates)
+    fx={"corporate_currency":corp,
+        "missing_rates":sorted({c for r in region_currency for c in r["unconvertible"]}),
+        # Only deals that would contribute value: open ones and closed-won; a lost deal in an
+        # unrated currency was never part of any figure.
+        "unconvertible_opportunities":sum(1 for o in os_ if (norm_currency(o.get("currency")) or corp) not in rates and (o.get("status")=="Closed Won" or not str(o.get("status") or "").startswith("Closed ")))}
+    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps,"region_currency":region_currency,"fx":fx}
 
 @app.get("/api/notifications")
 def list_notifications(u=Depends(current_user)):
@@ -1801,7 +2002,7 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
     all_regions=sorted({x.get("region") or "Unassigned" for x in lead_rows(u)})
     def cv(v,c):
         x=to_corporate(v,c,rates)
-        if x is None: missing.add(c or corp); return 0.0
+        if x is None: missing.add(norm_currency(c) or corp); return 0.0
         return x
     lp=[x for x in ls if start.isoformat()<=str(x["created_at"])[:10]<end.isoformat()]
     op=[x for x in os_ if start.isoformat()<=str(x["created_at"])[:10]<end.isoformat()]
@@ -1832,7 +2033,7 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
         for v in vtags(o["vertical"]): vbucket(sv(src),v)["pipeline"]+=amount
         ob=obucket(so(src),o["owner_name"]); ob["opportunities"]+=1; ob["pipeline"]+=amount
     for o in won:
-        value=cv(o.get("final_amount") or o.get("amount"),o.get("currency"))
+        value=cv(won_amount(o),o.get("currency"))
         for v in vtags(o["vertical"]): verticals.setdefault(v,{"vertical":v,"leads":0,"pipeline":0,"won":0})["won"]+=value
         src=lmap.get(o["lead_id"],{}).get("source","Other"); sources.setdefault(src,{"source":src,"leads":0,"opportunities":0,"won":0})["won"]+=1
         for v in vtags(o["vertical"]): vbucket(sv(src),v)["won"]+=value
@@ -1857,7 +2058,12 @@ def period_report(year:int=Query(default=date.today().year),period:str=Query(def
             locations[c]["pipeline"]+=cv(o.get("amount"),o.get("currency"))
     # Donut order and its per-source breakdown must line up, so both read from the same ranking.
     ranked_sources=sorted(sources.values(),key=lambda x:x["leads"],reverse=True)
-    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":ranked_sources,"source_breakdown":[{"source":r["source"],"verticals":sorted(src_verticals.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True),"owners":sorted(src_owners.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True)} for r in ranked_sources],"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True),"locations":sorted(locations.values(),key=lambda x:x["leads"],reverse=True),"region_counts":[{"region":k,"leads":v} for k,v in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0]=="Unassigned",kv[0].lower()))]}
+    # The period figures answer "what happened in Q4"; these answer "where do we stand today" over the
+    # same scope and region filter - the numbers the Pipeline and Dashboard pages show.
+    active_now=[x for x in os_ if not str(x.get("status") or "").startswith("Closed ")]; won_all=[x for x in os_ if x.get("status")=="Closed Won"]
+    all_time={"open_pipeline":round(sum(cv(x.get("amount"),x.get("currency")) for x in active_now),2),"active_opportunities":len(active_now),
+              "closed_won_value":round(sum(cv(won_amount(x),x.get("currency")) for x in won_all),2),"closed_won_count":len(won_all)}
+    return {"period":p,"year":year,"region":region,"regions":all_regions,"currency":corp,"missing_fx_rates":sorted(missing),"all_time":all_time,"summary":{"leads_created":len(lp),"opportunities_created":len(op),"pipeline_created":round(sum(cv(x.get("amount"),x.get("currency")) for x in op),2),"closed_won_count":len(won),"closed_won_value":round(sum(cv(x.get("final_amount") or x.get("amount"),x.get("currency")) for x in won),2),"closed_lost_count":len(lost),"win_rate":round(len(won)/(len(won)+len(lost))*100,1) if won or lost else 0},"verticals":sorted(verticals.values(),key=lambda x:x["pipeline"],reverse=True),"sources":ranked_sources,"source_breakdown":[{"source":r["source"],"verticals":sorted(src_verticals.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True),"owners":sorted(src_owners.get(r["source"],{}).values(),key=lambda x:x["pipeline"],reverse=True)} for r in ranked_sources],"owners":sorted(owners.values(),key=lambda x:x["pipeline"],reverse=True),"locations":sorted(locations.values(),key=lambda x:x["leads"],reverse=True),"region_counts":[{"region":k,"leads":v} for k,v in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0]=="Unassigned",kv[0].lower()))]}
 
 @app.get("/api/admin/master-values")
 def get_masters(u=Depends(current_user)): return rows(select(master_values).where(master_values.c.active==True).order_by(master_values.c.category,master_values.c.sort_order))
@@ -1910,26 +2116,84 @@ def update_field_permission(p:Payload,u=Depends(require_csrf)):
 @app.get("/api/admin/currency")
 def currency_settings(u=Depends(require_perm("FORECAST_VIEW"))):
     corp=corporate_currency(); rates=rows(select(fx_rates).order_by(fx_rates.c.currency))
-    return {"corporate_currency":corp,"rates":rates,"warning":"Rates marked DEMO-SEED must be replaced with approved treasury/finance rates before production use."}
+    stale=[r["currency"] for r in rates if r.get("source") in ("DEFAULT","DEMO-SEED")]
+    manual=[r["currency"] for r in rates if r.get("source") in MANUAL_SOURCES]
+    return {"corporate_currency":corp,"rates":rates,
+        "provider":{"name":FX_PROVIDER,"configured":fx_provider_configured(),"auto_refresh":FX_AUTO_REFRESH},
+        "stale_rates":stale,"manual_rates":manual,
+        "warning":"Rates still on their seeded placeholder values must be replaced with live or treasury-approved rates before they are relied on." if stale else ""}
+
+@app.get("/api/currency/rates")
+def currency_rates(u=Depends(current_user)):
+    """The rate table for display-side conversion — readable by anyone signed in.
+
+    The API reports every total in the corporate currency; the "view in" picker on the money pages
+    divides by these to show the same figures in INR, GBP, etc. `as_of` is the oldest rate in play,
+    so a stale row is never hidden behind a fresher one.
+    """
+    corp=norm_currency(corporate_currency()); rates=fx_map()
+    stored=[r for r in rows(select(fx_rates.c.currency,fx_rates.c.rate_to_corporate,fx_rates.c.as_of,fx_rates.c.source))
+            if r["currency"]==norm_currency(r["currency"]) and norm_currency(r["currency"])!=corp]  # canonical rows the map is built from
+    as_of=min([iso_date(r["as_of"]) for r in stored if iso_date(r.get("as_of"))], default=None)
+    manual=sorted(r["currency"] for r in stored if r.get("source") in MANUAL_SOURCES)
+    placeholder=sorted(r["currency"] for r in stored if r.get("source") in ("DEFAULT","DEMO-SEED"))
+    # "live" means every rate in play came from the provider; "stale" means the oldest is over two
+    # days old regardless of where it came from - a month of failed refreshes must not read as live.
+    return {"corporate_currency":corp,"rates":rates,"as_of":as_of,
+        "sources":sorted({r["source"] for r in stored if r.get("source")}),
+        "live":bool(stored) and all(r.get("source")==FX_PROVIDER for r in stored),
+        "stale":bool(as_of) and (date.today()-date.fromisoformat(as_of)).days>2,
+        "manual":manual,"placeholder":placeholder}
+
+@app.post("/api/admin/currency/refresh")
+def refresh_currency_rates(u=Depends(require_csrf)):
+    """Pull live rates from the provider for every currency the data actually uses."""
+    if "TARGET_EDIT" not in u["permissions"] and "ROLE_ADMIN" not in u["permissions"]: raise HTTPException(403,"Forecast administration permission required")
+    result=refresh_fx_rates(u["id"]); audit(u["id"],"currency",None,"REFRESH",result)
+    return {**currency_settings(u),"refresh":result}
 
 @app.put("/api/admin/currency")
 def update_currency_settings(p:Payload,u=Depends(require_csrf)):
     if "TARGET_EDIT" not in u["permissions"] and "ROLE_ADMIN" not in u["permissions"]: raise HTTPException(403,"Forecast administration permission required")
-    d=p.data; corp=(d.get("corporate_currency") or corporate_currency()).upper(); rates=d.get("rates") or []
+    d=p.data; old_corp=norm_currency(corporate_currency()); corp=norm_currency(d.get("corporate_currency")) or old_corp
+    if not re.fullmatch(r"[A-Z]{3}",corp): raise HTTPException(400,"Corporate currency must be a 3-letter code")
+    # Validate every row before touching anything, so a bad row cannot leave a half-applied change.
+    cleaned=[]
+    for rr in d.get("rates") or []:
+        cur=norm_currency(rr.get("currency"))
+        if not re.fullmatch(r"[A-Z]{3}",cur): raise HTTPException(400,"FX currency must be a 3-letter code")
+        try: rate=float(rr.get("rate_to_corporate"))
+        except (TypeError,ValueError): raise HTTPException(400,f"FX rate for {cur} must be a number")
+        if rate!=rate or rate in (float("inf"),float("-inf")) or rate<=0: raise HTTPException(400,"FX rates must be positive finite numbers")
+        as_of=iso_date(rr.get("as_of")) if rr.get("as_of") else today_str()
+        if not as_of: raise HTTPException(400,f"as_of for {cur} must be a date (YYYY-MM-DD)")
+        source=str(rr.get("source") or "MANUAL").strip().upper()
+        cleaned.append((cur,rate,as_of,source))
+    # Every stored rate is expressed against the corporate currency, so changing it re-bases all of
+    # them. Either the provider supplies the new set (fetched BEFORE anything is written, so a
+    # provider failure changes nothing) or the request itself carries a rate for every currency in use.
+    quotes=as_of_provider=None
+    if corp!=old_corp:
+        if fx_provider_configured(): quotes,as_of_provider=fetch_fx_quotes(corp)
+        else:
+            supplied={c for c,_,_,_ in cleaned}|{corp}; needed=currencies_in_use()-supplied
+            if needed: raise HTTPException(409,f"Changing the corporate currency without EXCHANGERATE_API_KEY needs a rate for every currency in use; missing: {', '.join(sorted(needed))}")
     ex=row(select(org_settings.c.id).where(org_settings.c.key=="corporate_currency"))
     if ex: execute(update(org_settings).where(org_settings.c.id==ex["id"]).values(value=corp,updated_by=u["id"],updated_at=utcnow()))
     else: execute(insert(org_settings).values(key="corporate_currency",value=corp,updated_by=u["id"]))
-    for rr in rates:
-        cur=str(rr["currency"]).upper(); rate=float(rr["rate_to_corporate"])
-        if rate<=0: raise HTTPException(400,"FX rates must be positive")
-        exr=row(select(fx_rates.c.id).where(fx_rates.c.currency==cur)); vals={"rate_to_corporate":rate,"as_of":rr.get("as_of") or today_str(),"source":rr.get("source") or "MANUAL","updated_by":u["id"],"updated_at":utcnow()}
+    rebase=None
+    if quotes is not None: rebase=refresh_fx_rates(u["id"],quotes=quotes,as_of=as_of_provider,override_manual=True)  # old-base manual rates are meaningless now
+    for cur,rate,as_of,source in cleaned:
+        exr=row(select(fx_rates.c.id).where(fx_rates.c.currency==cur)); vals={"rate_to_corporate":rate,"as_of":as_of,"source":source,"updated_by":u["id"],"updated_at":utcnow()}
         if exr: execute(update(fx_rates).where(fx_rates.c.id==exr["id"]).values(**vals))
         else: execute(insert(fx_rates).values(currency=cur,**vals))
     # enforce corporate base at 1
     base=row(select(fx_rates.c.id).where(fx_rates.c.currency==corp))
-    if base: execute(update(fx_rates).where(fx_rates.c.id==base["id"]).values(rate_to_corporate=1.0,updated_by=u["id"],updated_at=utcnow()))
+    if base: execute(update(fx_rates).where(fx_rates.c.id==base["id"]).values(rate_to_corporate=1.0,as_of=today_str(),source="CORPORATE-BASE",updated_by=u["id"],updated_at=utcnow()))
     else: execute(insert(fx_rates).values(currency=corp,rate_to_corporate=1.0,as_of=today_str(),source="CORPORATE-BASE",updated_by=u["id"]))
-    audit(u["id"],"currency",None,"UPDATE",d); return currency_settings(u)
+    if corp!=old_corp: audit(u["id"],"currency",None,"REBASE",{"from":old_corp,"to":corp,"provider":rebase})
+    audit(u["id"],"currency",None,"UPDATE",d); out=currency_settings(u)
+    return {**out,"rebase":rebase} if rebase else out
 
 @app.get("/api/saved-views")
 def list_saved_views(module:str|None=None,u=Depends(current_user)):
@@ -2072,15 +2336,23 @@ def query_opportunities(q:str="",status:str="",forecast_category:str="",owner_id
     if common: base=base.where(*common)
     nrow=row(select(func.count().label("total")).select_from(base.subquery())); n=int((nrow or {}).get("total",0))
     raw=rows(base.order_by(opportunities.c.updated_at.desc()).offset((page-1)*page_size).limit(page_size)); items=[mask_fields(u,"opportunity",x) for x in raw]
-    summary_rows=rows(select(opportunities.c.amount,opportunities.c.currency,opportunities.c.forecast_category,opportunities.c.status,opportunities.c.next_follow_up_date).select_from(opportunities.join(companies,companies.c.id==opportunities.c.company_id).join(owner,owner.c.id==opportunities.c.owner_id)).where(opportunity_visibility_condition(u),*common))
+    summary_rows=rows(select(opportunities.c.amount,opportunities.c.final_amount,opportunities.c.currency,opportunities.c.forecast_category,opportunities.c.status,opportunities.c.next_follow_up_date).select_from(opportunities.join(companies,companies.c.id==opportunities.c.company_id).join(owner,owner.c.id==opportunities.c.owner_id)).where(opportunity_visibility_condition(u),*common))
     rates=fx_map(); pipeline=best=commit=0.0; due=active=0
+    # Per-stage converted totals over the WHOLE filtered set, so the board's column headers do not
+    # have to add raw native amounts from the current page (INR + USD used to be summed as "USD").
+    by_status={}; missing=set(); corp=norm_currency(corporate_currency())
     for o in summary_rows:
-        if str(o.get("status") or "").startswith("Closed "): continue
-        active+=1; val=to_corporate(o.get("amount"),o.get("currency"),rates) or 0; pipeline+=val
+        st=str(o.get("status") or ""); conv=to_corporate(won_amount(o) if st=="Closed Won" else o.get("amount"),o.get("currency"),rates)
+        g=by_status.setdefault(st,{"count":0,"value":0.0,"unrated":0}); g["count"]+=1
+        if conv is None: missing.add(norm_currency(o.get("currency")) or corp); g["unrated"]+=1
+        else: g["value"]+=conv
+        if st.startswith("Closed "): continue
+        active+=1; val=conv or 0; pipeline+=val
         if o.get("forecast_category")=="Best Case": best+=val
         if o.get("forecast_category")=="Commit": commit+=val
         if o.get("next_follow_up_date") and o["next_follow_up_date"]<=today_str(): due+=1
-    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"currency":corporate_currency(),"summary":{"active":active,"pipeline":round(pipeline,2),"best_case":round(best,2),"commit":round(commit,2),"followups_due":due}}
+    for g in by_status.values(): g["value"]=round(g["value"],2)
+    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"currency":corporate_currency(),"missing_fx_rates":sorted(missing),"summary":{"active":active,"pipeline":round(pipeline,2),"best_case":round(best,2),"commit":round(commit,2),"followups_due":due,"by_status":by_status}}
 
 @app.get("/api/integrations/microsoft/status")
 def microsoft_status(u=Depends(current_user)):
@@ -2335,7 +2607,14 @@ def kpi_users_with_category(u=Depends(current_user)):
     """List users that have a category assigned (for admin review dropdown)."""
     if u["role"] not in ("Super Admin","Admin"): raise HTTPException(403)
     if not _HAS_CATEGORY: return []
-    return [{**r,"category":canon_category(r["category"])} for r in rows(select(users.c.id,users.c.name,users.c.category).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name))]
+    corp=norm_currency(corporate_currency())
+    out=[]
+    for r in rows(select(users.c.id,users.c.name,users.c.category,users.c.region).where(and_(users.c.category!=None,users.c.category!="",users.c.active==True)).order_by(users.c.name)):
+        # A person can be assigned several regions ("India, UK"); each maps to the currency they work in.
+        regions=[x.strip() for x in str(r.get("region") or "").split(",") if x.strip()]
+        out.append({**r,"category":canon_category(r["category"]),"regions":regions,
+                    "currencies":[{"region":x,"currency":region_currency(x,corp)} for x in regions]})
+    return out
 
 @app.post("/api/kpi/templates")
 def kpi_template_create(p:Payload,u=Depends(require_csrf)):
@@ -2964,8 +3243,8 @@ def add_partner_opportunity(partnership_id:int,p:Payload,u=Depends(require_csrf)
     d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(partnerships.c.company_id,partnerships.c.owner_id).where(partnerships.c.id==partnership_id)); owner=int(d.get("owner_id") or l["owner_id"])
     if not can_assign(u,owner): raise HTTPException(403,"You cannot assign this opportunity to that user")
     if not d.get("name"): raise HTTPException(400,"Opportunity name is required")
-    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=float(d.get("amount") or 0); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
-    oid=execute(insert(partner_opportunities).values(partnership_id=partnership_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=d.get("currency") or "USD",probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
+    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
+    oid=execute(insert(partner_opportunities).values(partnership_id=partnership_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=norm_currency(d.get("currency")) or norm_currency(corporate_currency()),probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
     if d.get("presales_owner_id"):
         execute(insert(partner_opportunity_team).values(opportunity_id=oid,user_id=int(d["presales_owner_id"]),team_role="Presales Owner",created_by=u["id"]))
     execute(update(partnerships).where(partnerships.c.id==partnership_id).values(status="Qualified",updated_at=utcnow())); audit(u["id"],"partner_opportunity",oid,"CREATE",d); return partner_opportunity_detail(oid,u)
@@ -2980,6 +3259,9 @@ def update_partner_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
     if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
+    if "currency" in vals: vals["currency"]=norm_currency(vals["currency"]) or norm_currency(corporate_currency())
+    if "amount" in vals: vals["amount"]=money_value(vals["amount"]) or 0.0
+    if "final_amount" in vals: vals["final_amount"]=money_value(vals["final_amount"],"final_amount")
     amount=float(vals.get("amount",old["amount"]) or 0); prob=float(vals.get("probability",old["probability"]) or 0); vals["weighted_value"]=amount*prob/100
     if "forecast_category" not in d and "status" in d: vals["forecast_category"]=forecast_from_status(status)
     vals["closed_at"]=today_str() if status.startswith("Closed ") else None; vals["updated_at"]=utcnow(); execute(update(partner_opportunities).where(partner_opportunities.c.id==opp_id).values(**vals))

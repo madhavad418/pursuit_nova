@@ -7,6 +7,9 @@ os.environ['SEED_DEMO']='true'
 os.environ['SEED_DEMO_DATA']='true'
 os.environ['JWT_SECRET']='test-secret-key-that-is-long-enough-for-hs256-validation-2026'
 os.environ['COOKIE_SECURE']='false'
+# Never let a developer's provider key leak into the suite: tests patch httpx and must stay offline.
+os.environ.pop('EXCHANGERATE_API_KEY', None)
+os.environ['FX_AUTO_REFRESH']='false'
 
 import pytest
 from fastapi.testclient import TestClient

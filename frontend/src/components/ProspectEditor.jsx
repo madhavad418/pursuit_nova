@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { Button, Field, Input, Modal, PeoplePicker, Select, Spinner, TagsInput, Textarea } from './UI'
 import { isRequestedHiddenAdmin, visiblePickerUsers } from '../lib/users'
+import { useViewCurrency } from '../lib/useViewCurrency'
+import { currencySymbol } from '../lib/format'
 
 export const LEAD_STATUSES = ['New', 'Assigned', 'Contacted', 'Engaged', 'Not Engaged', 'Qualified', 'Converted', 'On Hold', 'Unresponsive', 'Disqualified', 'Lost']
 export const LEAD_SOURCES = ['LinkedIn', 'Referral', 'Event', 'Conference', 'Website', 'Existing Customer', 'Partner', 'Management Reference', 'Outbound', 'RFP / Tender', 'Other']
@@ -16,7 +18,7 @@ const changed = (form, orig, keys) => Object.fromEntries(keys.filter(k => str(fo
 
 // The edit form mirrors "Create prospect": Company, Primary contact, Prospect ownership (plus Status, which only editing can change).
 const COMPANY_KEYS = ['name', 'vertical', 'website', 'linkedin_url']
-const LEAD_KEYS = ['region', 'country', 'state', 'city', 'owner_id', 'temperature', 'source', 'source_detail', 'next_follow_up', 'status', 'remarks']
+const LEAD_KEYS = ['region', 'country', 'state', 'city', 'currency', 'owner_id', 'temperature', 'source', 'source_detail', 'next_follow_up', 'status', 'remarks']
 // Form key -> contact field
 const CONTACT_KEYS = { contact_name: 'name', designation: 'designation', email: 'email', phone: 'phone', contact_linkedin: 'linkedin_url' }
 
@@ -34,7 +36,7 @@ export function ProspectEditor({ leadId, open, onClose, onSaved, onToast }) {
             const l = d.lead; const contacts = d.contacts || []
             const primary = contacts.find(c => c.is_primary) || contacts[0] || null   // same contact the Overview shows as primary
             const orig = {
-                name: l.company_name, vertical: l.vertical, website: l.website, linkedin_url: l.linkedin_url, region: l.region, country: l.country, state: l.state, city: l.city,
+                name: l.company_name, vertical: l.vertical, website: l.website, linkedin_url: l.linkedin_url, region: l.region, country: l.country, state: l.state, city: l.city, currency: l.currency,
                 owner_id: String(l.owner_id), temperature: l.temperature, source: l.source, source_detail: l.source_detail, next_follow_up: l.next_follow_up, status: l.status, remarks: l.remarks,
                 ...Object.fromEntries(Object.entries(CONTACT_KEYS).map(([k, f]) => [k, primary?.[f]]))
             }
@@ -42,6 +44,7 @@ export function ProspectEditor({ leadId, open, onClose, onSaved, onToast }) {
         }).catch(e => live && setError(e.message))
         return () => { live = false }
     }, [open, leadId])
+    const fx = useViewCurrency()  // rated currencies for the Currency field; blank = region default
     const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
     const perms = detail?.permissions || {}
     const lockedContactFields = new Set(perms.locked_contact_fields || [])
@@ -97,7 +100,7 @@ export function ProspectEditor({ leadId, open, onClose, onSaved, onToast }) {
                 <Field label="Vertical" required hint="Add as many as apply — pick from the list or type new ones"><TagsInput disabled={locked('vertical')} required options={VERTICALS} value={form.vertical} onChange={v => set('vertical', v)} placeholder="e.g. Telecommunications" /></Field>
                 <Field label="Website">{input('website', { placeholder: 'https://' })}</Field>
                 <Field label="LinkedIn company">{input('linkedin_url', { placeholder: 'https://linkedin.com/company/...' })}</Field>
-                <Field label="Region">{select('region', <><option value="">Select region</option>{withCurrent(REGIONS, form.region).map(x => <option key={x}>{x}</option>)}</>)}</Field>
+                <Field label="Region">{select('region', <><option value="">Select region</option>{withCurrent(REGIONS, form.region).map(x => <option key={x}>{x}</option>)}</>)}</Field><Field label="Currency">{select('currency', <><option value="">Default for region</option>{withCurrent(fx.options, form.currency).map(c => <option key={c} value={c}>{currencySymbol(c)} {c}{c === fx.corporate ? ' (corporate)' : ''}</option>)}</>)}</Field>
                 <Field label="Country">{input('country', { maxLength: 100 })}</Field>
                 <Field label="State">{input('state', { maxLength: 100 })}</Field>
                 <Field label="City">{input('city', { maxLength: 100 })}</Field>
