@@ -432,10 +432,20 @@ def auto_refresh_fx_rates():
         unrated=currencies_in_use()-set(fx_map())  # a currency first used today, before any boot
         today_utc=datetime.now(timezone.utc).date().isoformat()  # the provider stamps UTC dates
         if newest>=today_utc and not placeholders and not unrated: return
-        result=refresh_fx_rates(); audit(None,"currency",None,"AUTO-REFRESH",result)
-        logger.info("fx auto-refresh: %s", result)
+        # A shared cloud egress IP can trip the provider's per-IP throttle, and a cold container can
+        # lose a DNS lookup: try a few times before giving up, and leave a readable reason behind.
+        # The messages are ours (status/class only), never the provider's raw text, so no key leaks.
+        last=None
+        for attempt,delay in enumerate((0,15,45),1):
+            if delay: time.sleep(delay)
+            try:
+                result=refresh_fx_rates(); audit(None,"currency",None,"AUTO-REFRESH",{**result,"attempt":attempt})
+                logger.info("fx auto-refresh (attempt %s): %s", attempt, result); return
+            except HTTPException as e:
+                last=f"{e.status_code}: {e.detail}"; logger.warning("fx auto-refresh attempt %s failed: %s", attempt, last)
+        audit(None,"currency",None,"AUTO-REFRESH-FAILED",{"reason":last,"attempts":attempt})
     except Exception as e:
-        logger.warning("fx auto-refresh skipped: %s", e.__class__.__name__)
+        logger.warning("fx auto-refresh skipped: %s: %s", e.__class__.__name__, (str(e)[:200].replace(EXCHANGERATE_API_KEY,"<key>") if EXCHANGERATE_API_KEY else str(e)[:200]))
 
 def region_currency_breakdown(lead_list, opp_list, rates):
     """Pipeline and won totals per region, each kept in the opportunity's OWN currency.

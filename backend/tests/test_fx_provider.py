@@ -352,3 +352,31 @@ def test_rates_endpoint_flags_staleness_separately_from_provenance(client, login
 def test_closed_won_at_zero_reports_zero_not_the_pre_close_amount():
     assert main.won_amount({"amount": 500_000, "final_amount": 0}) == 0
     assert main.won_amount({"amount": 500_000, "final_amount": None}) == 500_000
+
+
+def test_auto_refresh_retries_a_transient_failure_and_records_the_reason(client, login, monkeypatch):
+    """A throttled or unreachable provider at boot is retried, and a final failure is audited with
+    a readable reason that never contains the key."""
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)  # no real backoff in the suite
+    main.execute(main.update(main.fx_rates).values(source="DEFAULT"))
+    attempts = {"n": 0}
+    class _Flaky:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url):
+            attempts["n"] += 1
+            return _Response({}, 429) if attempts["n"] == 1 else _Response(PAYLOAD)
+    monkeypatch.setattr(main, "EXCHANGERATE_API_KEY", API_KEY)
+    monkeypatch.setattr(main.httpx, "Client", _Flaky)
+    monkeypatch.setattr(main, "FX_AUTO_REFRESH", True)
+    main.auto_refresh_fx_rates()
+    assert attempts["n"] == 2, "first attempt throttled, second succeeds"
+    assert main.fx_map()["INR"] == pytest.approx(1 / 96.467)
+
+    # Every attempt failing leaves an audit row naming the reason.
+    main.execute(main.update(main.fx_rates).values(source="DEFAULT"))
+    _fake_provider(monkeypatch, {}, status=429)
+    main.auto_refresh_fx_rates()
+    row = main.rows(main.select(main.audit_logs).where(main.audit_logs.c.action == "AUTO-REFRESH-FAILED").order_by(main.audit_logs.c.id.desc()))[0]
+    assert "quota is exhausted" in str(row["details"]) and API_KEY not in str(row["details"])
