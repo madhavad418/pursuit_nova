@@ -12,7 +12,7 @@ installed Chrome — no browser download.
 | `pipeline.mjs` | Pipeline stage totals are converted whole-set totals, mixed-currency columns, drawer currency editor |
 | `smoke360.mjs` | Lead360 / Partnership360 render; new-opportunity currency defaults to the prospect's currency (corporate for partnerships) |
 | `prospects.mjs` | Prospects table shows symbol + code by default; create form offers "Default for region"; edit form prefilled, saves, blank restores the default |
-| `kpi_review.mjs` | KPI Tracker → Review team: a month alone shows nobody; choosing a person loads only theirs; two assigned regions → two live currency conversions |
+| `kpi_review.mjs` | KPI Tracker → Review team: a month alone shows nobody; choosing a person loads only theirs; "All people" is an explicit opt-in |
 | `reconcile.mjs` | Open pipeline agrees across Pipeline / Dashboard / Leadership and closed-won across Dashboard / Leadership, in USD and EUR; Leadership cards name their period |
 
 ```bash

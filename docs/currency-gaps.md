@@ -140,8 +140,8 @@ The same viewer must read the same number for the same thing on every page. Peri
 | # | Criterion | Sev | Status | Evidence | Residual |
 |---|---|---|---|---|---|
 | 9.1 | Review team shows nobody's data until a person is chosen; "All people" is an explicit opt-in | H | ✅ | No `/api/kpi/review` call without a person (`E:kpi_review changing the month fetches nothing without a person`, `only … calls carry user_id`); `test_kpi_review_regions.py::test_review_list_is_scoped_to_the_requested_person` | Manage-KPIs tab still lists everyone by default (not in scope) |
-| 9.2 | A person's assigned regions each show their currency and the live conversion both ways | M | ✅ | `users-with-category` returns `regions` + `currencies` via `region_currency`; `test_two_regions_give_two_conversions` (India, UK → INR, GBP); `E:kpi_review two regions -> two currency conversions`, `INR conversion matches the rate table` | KPI actual values themselves are unitless counts — nothing to convert; the strip explains the person's working currencies |
-| 9.3 | Regional currencies of people count as "in use" so the provider fetches their rates | M | ✅ | `currencies_in_use()` includes active users' region currencies; asserted in `test_two_regions_give_two_conversions` | A region whose currency the provider does not quote shows "no exchange rate yet" |
+| 9.2 | A reviewable person's assigned regions and their currencies are available to the API | L | ✅ | `users-with-category` returns `regions` + `currencies` via `region_currency`; `test_two_regions_give_two_conversions` (India, UK → INR, GBP) | The on-screen conversion strip was built and then removed from the KPI tab at the owner's request; the data stays for any other surface |
+| 9.3 | Regional currencies of people count as "in use" so the provider fetches their rates | M | ✅ | `currencies_in_use()` includes active users' region currencies; asserted in `test_two_regions_give_two_conversions` | — |
 
 ---
 

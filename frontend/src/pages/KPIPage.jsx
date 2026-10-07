@@ -1,7 +1,5 @@
 import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
-import { useViewCurrency } from '../lib/useViewCurrency'
-import { currencySymbol, dateText } from '../lib/format'
 import { useAuth } from '../components/Auth'
 import { Button,Empty,ErrorBanner,Field,Input,Modal,Pill,SectionHeader,Select,Textarea } from '../components/UI'
 import { Icon } from '../components/Icons'
@@ -242,12 +240,9 @@ function AdminReviewView({onToast}){
  const [reviewModal,setReviewModal]=useState(null); const [reviewForm,setReviewForm]=useState({status:'approved',review_remarks:''})
 
  useEffect(()=>{api.get('/api/kpi/users-with-category').then(setKpiUsers).catch(()=>{})},[])
- const fx=useViewCurrency()
  // Nothing is fetched until a person is chosen - a month on its own must not show anyone's data.
  const load=()=>{setError(null);if(!selectedUser){setData([]);return}let url='/api/kpi/review?month='+month;if(selectedUser!=='all')url+='&user_id='+selectedUser;api.get(url).then(setData).catch(setError)}
  useEffect(()=>{load()},[month,selectedUser])
- const reviewee=kpiUsers.find(u=>String(u.id)===selectedUser)
- const rateLine=c=>{const r=fx.rates?.[c];if(!r)return 'no exchange rate yet';const corp=fx.corporate;const fmt=(v,cur,d)=>new Intl.NumberFormat('en-US',{style:'currency',currency:cur,maximumFractionDigits:d}).format(v);return `1 ${c} = ${fmt(r,corp,4)} · 1 ${corp} = ${fmt(1/r,c,2)}`}
 
  const openReview=item=>{setReviewForm({status:'approved',review_remarks:''});setReviewModal(item)}
  const submitReview=async()=>{
@@ -263,7 +258,6 @@ function AdminReviewView({onToast}){
    <Select value={selectedUser} onChange={e=>setSelectedUser(e.target.value)} aria-label="Person to review"><option value="">Select a person…</option>{kpiUsers.map(u=><option key={u.id} value={u.id}>{u.name} · {u.category}</option>)}<option value="all">All people</option></Select>
   </div>
   <ErrorBanner error={error} onRetry={load}/>
-  {reviewee&&<div className="kpi-regions panel">{reviewee.currencies?.length?<><strong>{reviewee.name}</strong><span>works in {reviewee.regions.join(' · ')} — figures convert as:</span><ul>{reviewee.currencies.map(x=><li key={x.region}><em>{x.region}</em><b>{currencySymbol(x.currency)} {x.currency}</b><small>{rateLine(x.currency)}</small></li>)}</ul><small className="kpi-regions-asof">Rates as of {dateText(fx.asOf)}{fx.corporate?` · corporate ${fx.corporate}`:''}</small></>:<><strong>{reviewee.name}</strong><span>has no region assigned — figures are in the corporate currency ({fx.corporate}).</span></>}</div>}
   {!selectedUser&&<Empty title="Choose a person to review" text={`Pick a person above to see their KPI submission for ${monthLabel(month)}. Nothing is shown for a month on its own.`}/>}
   {selectedUser&&data.length===0&&<Empty title="No submissions" text="No KPI submissions found for the selected person and month."/>}
   {data.map(ug=><section key={`${ug.user_id}-${ug.category}`} className="panel kpi-group">
