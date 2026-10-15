@@ -303,6 +303,25 @@ def norm_currency(value):
 CURRENCY_ALIASES={"RS":"INR","RS.":"INR","RUPEE":"INR","RUPEES":"INR","\u20b9":"INR","$":"USD","US$":"USD","USD$":"USD","DOLLAR":"USD","DOLLARS":"USD",
     "\u00a3":"GBP","POUND":"GBP","POUNDS":"GBP","\u20ac":"EUR","EURO":"EUR","EUROS":"EUR","DIRHAM":"AED","DIRHAMS":"AED","DHS":"AED"}
 
+# The ten stages the app offers. `opportunities.status` is free text, and every dashboard figure is
+# decided by comparing it to these exact strings, so a stored "Closed Won " (trailing space) matched
+# `startswith("Closed ")` but not `== "Closed Won"` and fell out of BOTH the won and the pipeline
+# figure - the opportunity was still in the table, worth nothing on every panel. Same silent-zero
+# shape as the currency bug, and fixed the same way: canonicalise once, on the way in.
+OPPORTUNITY_STAGES=["New Opportunity","Qualified","Discussion","Presales / Solutioning","Proposal Submitted",
+    "Awaiting Response","Negotiation","Closed Won","Closed Lost","Closed Hold"]
+_STAGE_BY_SHAPE={"".join(s.lower().split()):s for s in OPPORTUNITY_STAGES}
+
+def norm_status(value):
+    """One canonical spelling for an opportunity stage, matched ignoring case and spacing.
+
+    An unrecognised value is returned as given rather than rejected: statuses predate this guard and
+    an import or integration may legitimately carry one, and a 400 here would break a working caller.
+    The dashboard reports those separately instead, so they are visible rather than silently absent.
+    """
+    raw=str(value or "").strip()
+    return _STAGE_BY_SHAPE.get("".join(raw.lower().split()), raw)
+
 def money_value(value, field="amount", required=False):
     """Parse a money field from a request: a finite, non-negative number, or a 400.
 
@@ -483,6 +502,64 @@ def region_currency_breakdown(lead_list, opp_list, rates):
             "pipeline_corporate":corporate("pipeline"),"won_corporate":corporate("won"),
             "unconvertible":[leg["currency"] for leg in legs if not leg["convertible"]]})
     return sorted(out, key=lambda x:(-x["opportunities"], x["region"]))
+
+def currency_breakdown(opp_list, rates):
+    """Won and open-pipeline totals per booking currency, each kept in that currency.
+
+    The dashboard reports the business by the currency a deal was actually booked in rather than as
+    one blended corporate figure, so an INR deal is reported in INR and a USD deal in USD. The
+    `*_corporate` figures are attached only when that currency has a rate: an unrated currency
+    reports its real amount and is flagged, instead of converting to None and reading as zero.
+
+    A currency carrying neither open pipeline nor a win is left out. This view answers "what have we
+    won and what is still in play", and a currency whose every deal was lost has no answer to give.
+    """
+    fallback=norm_currency(corporate_currency())  # read once, not per opportunity
+    buckets={}
+    for o in opp_list:
+        cur=norm_currency(o.get("currency")) or fallback
+        b=buckets.setdefault(cur,{"currency":cur,"pipeline":0.0,"won":0.0,"pipeline_count":0,"won_count":0})
+        status=str(o.get("status") or "")
+        if status=="Closed Won": b["won"]+=float(won_amount(o) or 0); b["won_count"]+=1
+        elif not status.startswith("Closed "): b["pipeline"]+=float(o.get("amount") or 0); b["pipeline_count"]+=1
+    out=[]
+    for b in buckets.values():
+        if not b["pipeline_count"] and not b["won_count"]: continue
+        rate=rates.get(b["currency"])
+        out.append({**b,"pipeline":round(b["pipeline"],2),"won":round(b["won"],2),"convertible":rate is not None,
+            "pipeline_corporate":round(b["pipeline"]*rate,2) if rate is not None else None,
+            "won_corporate":round(b["won"]*rate,2) if rate is not None else None})
+    # Native amounts are not comparable across currencies (7,500,000 INR is not 7,500,000 USD), so
+    # the order is by corporate worth. Anything without a rate has no comparable worth and sorts
+    # last by code rather than pretending to a position in the ranking.
+    def rank(x):
+        corp=None if not x["convertible"] else (x["pipeline_corporate"] or 0)+(x["won_corporate"] or 0)
+        return (1,0,x["currency"]) if corp is None else (0,-corp,x["currency"])
+    return sorted(out, key=rank)
+
+def uncounted_opportunities(opp_list):
+    """Opportunities the by-currency view reports under neither Won nor Pipeline.
+
+    `unrecognised` is the one that matters. Every dashboard figure is decided by an exact-string
+    comparison against OPPORTUNITY_STAGES, so a status outside that list lands nowhere predictable:
+    "Closed Won " (trailing space) is counted as neither won nor open and vanishes from the page
+    entirely, while "won" is counted as pipeline. Either way the record looks to the person who
+    entered it like data the tool lost. Naming them turns a silent absence into a fixable fact.
+
+    Hold and lost are deliberate exclusions rather than faults, so they are reported as plain counts
+    - enough for the page to account for every record it was given without listing closed business.
+    """
+    fallback=norm_currency(corporate_currency())
+    unrecognised=[]; hold=lost=0
+    for o in opp_list:
+        status=str(o.get("status") or "")
+        if status not in OPPORTUNITY_STAGES:
+            unrecognised.append({"id":o.get("id"),"name":o.get("name"),"company":o.get("company_name"),
+                "status":status,"currency":norm_currency(o.get("currency")) or fallback,
+                "amount":float(o.get("amount") or 0)})
+        elif status=="Closed Hold": hold+=1
+        elif status=="Closed Lost": lost+=1
+    return {"unrecognised":sorted(unrecognised,key=lambda x:(x["status"],x["id"] or 0)),"on_hold":hold,"lost":lost}
 
 def fernet():
     key=INTEGRATION_ENCRYPTION_KEY.strip()
@@ -1653,7 +1730,7 @@ def add_opportunity(lead_id:int,p:Payload,u=Depends(require_csrf)):
     d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(leads.c.company_id,leads.c.owner_id,leads.c.currency).where(leads.c.id==lead_id)); owner=int(d.get("owner_id") or l["owner_id"])
     if not can_assign(u,owner): raise HTTPException(403,"You cannot assign this opportunity to that user")
     if not d.get("name"): raise HTTPException(400,"Opportunity name is required")
-    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
+    status=norm_status(d.get("status")) or "New Opportunity"; d["status"]=status; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
     oid=execute(insert(opportunities).values(lead_id=lead_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=norm_currency(d.get("currency")) or norm_currency(l.get("currency")) or norm_currency(corporate_currency()),probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
     if d.get("presales_owner_id"):
         execute(insert(opportunity_team).values(opportunity_id=oid,user_id=int(d["presales_owner_id"]),team_role="Presales Owner",created_by=u["id"]))
@@ -1665,7 +1742,8 @@ def update_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
     old=row(select(opportunities).where(opportunities.c.id==opp_id)); d=p.data; ensure_fields_editable(u,"opportunity",d)
     if "owner_id" in d and int(d["owner_id"]) != int(old["owner_id"]):
         if not can_assign(u, int(d["owner_id"])): raise HTTPException(403,"You cannot assign this opportunity to that user")
-    merged={**old,**d}; status=merged["status"]
+    merged={**old,**d}; status=norm_status(merged["status"])
+    if "status" in d: d["status"]=status
     if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
@@ -1841,12 +1919,14 @@ def dashboard_analytics(u=Depends(current_user)):
     # Region-wise native currency, plus an explicit account of anything the corporate-currency
     # figures above could not convert — those used to be folded in as a silent zero.
     region_currency=region_currency_breakdown(ls,os_,rates)
+    currency_totals=currency_breakdown(os_,rates)
+    uncounted=uncounted_opportunities(os_)
     fx={"corporate_currency":corp,
         "missing_rates":sorted({c for r in region_currency for c in r["unconvertible"]}),
         # Only deals that would contribute value: open ones and closed-won; a lost deal in an
         # unrated currency was never part of any figure.
         "unconvertible_opportunities":sum(1 for o in os_ if (norm_currency(o.get("currency")) or corp) not in rates and (o.get("status")=="Closed Won" or not str(o.get("status") or "").startswith("Closed ")))}
-    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps,"region_currency":region_currency,"fx":fx}
+    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps,"region_currency":region_currency,"currency_totals":currency_totals,"uncounted":uncounted,"fx":fx}
 
 @app.get("/api/notifications")
 def list_notifications(u=Depends(current_user)):
@@ -3253,7 +3333,7 @@ def add_partner_opportunity(partnership_id:int,p:Payload,u=Depends(require_csrf)
     d=p.data; ensure_fields_editable(u,"opportunity",d); l=row(select(partnerships.c.company_id,partnerships.c.owner_id).where(partnerships.c.id==partnership_id)); owner=int(d.get("owner_id") or l["owner_id"])
     if not can_assign(u,owner): raise HTTPException(403,"You cannot assign this opportunity to that user")
     if not d.get("name"): raise HTTPException(400,"Opportunity name is required")
-    status=d.get("status") or "New Opportunity"; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
+    status=norm_status(d.get("status")) or "New Opportunity"; d["status"]=status; validate_outcome(status,d); amount=money_value(d.get("amount")) or 0.0; d["final_amount"]=money_value(d.get("final_amount"),"final_amount"); prob=float(d.get("probability") or 10); fc=d.get("forecast_category") or forecast_from_status(status)
     oid=execute(insert(partner_opportunities).values(partnership_id=partnership_id,company_id=l["company_id"],owner_id=owner,presales_owner_id=d.get("presales_owner_id") or None,name=d["name"],service_practice=d.get("service_practice"),status=status,forecast_category=fc,amount=amount,currency=norm_currency(d.get("currency")) or norm_currency(corporate_currency()),probability=prob,weighted_value=amount*prob/100,expected_close_date=d.get("expected_close_date"),proposal_date=d.get("proposal_date"),last_follow_up_date=d.get("last_follow_up_date"),next_follow_up_date=d.get("next_follow_up_date"),follow_up_count=0,final_amount=d.get("final_amount"),lost_reason=d.get("lost_reason"),hold_reason=d.get("hold_reason"),hold_review_date=d.get("hold_review_date"),competitor=d.get("competitor"),remarks=d.get("remarks"),created_by=u["id"],closed_at=today_str() if status.startswith("Closed ") else None))
     if d.get("presales_owner_id"):
         execute(insert(partner_opportunity_team).values(opportunity_id=oid,user_id=int(d["presales_owner_id"]),team_role="Presales Owner",created_by=u["id"]))
@@ -3265,7 +3345,8 @@ def update_partner_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
     old=row(select(partner_opportunities).where(partner_opportunities.c.id==opp_id)); d=p.data; ensure_fields_editable(u,"opportunity",d)
     if "owner_id" in d and int(d["owner_id"]) != int(old["owner_id"]):
         if not can_assign(u, int(d["owner_id"])): raise HTTPException(403,"You cannot assign this opportunity to that user")
-    merged={**old,**d}; status=merged["status"]
+    merged={**old,**d}; status=norm_status(merged["status"])
+    if "status" in d: d["status"]=status
     if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}

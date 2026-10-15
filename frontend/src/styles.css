@@ -294,6 +294,19 @@
 .leg-won b{color:var(--green)}
 .leg-flag{margin-left:auto;font-size:9px;font-weight:750;color:#8a5a00;background:#f7ecd4;border-radius:999px;padding:3px 8px}
 .region-card>footer{border-top:1px solid #eef4f7;padding-top:9px;font-size:10px;color:var(--muted)}
+.region-card.is-unrated{border-color:#e8cf9f;background:#fffdf8}
+.region-card .leg-code{min-width:62px;text-align:center}
+.currency-total{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 18px;margin-top:14px;padding-top:13px;border-top:1px solid #eef4f7}
+.currency-total span{font-size:10px;font-weight:700;color:var(--muted);margin-right:auto}
+.currency-total strong{font-size:15px;letter-spacing:-.02em}
+.currency-total strong:first-of-type{color:var(--green)}
+.currency-total .text-warning{font-size:11px;font-weight:600;margin-right:0}
+.uncounted-list{list-style:none;display:grid;gap:4px;margin:8px 0 0;padding:0}
+.uncounted-list li{display:grid;grid-template-columns:minmax(0,1fr) 130px auto 110px;align-items:center;gap:10px;font-size:11px;padding:5px 0;border-top:1px solid #f0e2c4}
+.uncounted-list button{border:0;background:transparent;padding:0;text-align:left;font-size:11px;font-weight:700;color:#8a6119;text-decoration:underline;cursor:pointer;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.uncounted-list span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.uncounted-list code{font-size:10px;background:#f7ecd4;border-radius:5px;padding:2px 6px;color:#8a5a00;white-space:pre}
+.uncounted-list b{justify-self:end;font-size:11px}
 
 /* "View in" currency picker on the money pages. The caption tells the reader whether the rates
    behind a converted figure are live from the provider or hand-entered. */

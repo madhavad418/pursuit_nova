@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PursuitNova — Platform Data Flow (Management Overview)</title>
+<style>
+  :root{
+    --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --bg:#f1f5f9; --card:#ffffff;
+    --blue:#2563eb; --blue-bg:#eff6ff;
+    --green:#059669; --green-bg:#ecfdf5;
+    --amber:#d97706; --amber-bg:#fffbeb;
+    --purple:#7c3aed; --purple-bg:#f5f3ff;
+    --teal:#0d9488; --teal-bg:#f0fdfa;
+    --rose:#e11d48; --rose-bg:#fff1f2;
+    --slate:#475569; --slate-bg:#f8fafc;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{font-family:"Segoe UI", -apple-system, Roboto, Arial, sans-serif; background:var(--bg); color:var(--ink); line-height:1.55; padding:32px 16px 64px;}
+  .wrap{max-width:1180px; margin:0 auto;}
+  header{text-align:center; margin-bottom:8px;}
+  header h1{font-size:30px; letter-spacing:-.4px;}
+  header .sub{color:var(--muted); font-size:15px; margin-top:6px;}
+  .legend{display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:22px 0 30px;}
+  .chip{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:999px; background:var(--card); border:1px solid var(--line); color:var(--slate);}
+  .dot{width:10px; height:10px; border-radius:50%;}
+  .stage{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px 24px; box-shadow:0 1px 3px rgba(15,23,42,.06);}
+  .stage + .arrow{display:flex; justify-content:center; align-items:center; gap:10px; padding:6px 0; color:var(--muted);}
+  .arrow .a{font-size:22px; line-height:1; color:var(--slate);}
+  .arrow .lbl{font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--slate); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:4px 10px;}
+  .tag{font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; padding:4px 10px; border-radius:6px; display:inline-block;}
+  h2.stage-title{font-size:19px; margin:10px 0 4px;}
+  p.stage-sub{font-size:13.5px; color:var(--muted); margin-bottom:16px;}
+  .grid{display:grid; gap:14px;}
+  .g4{grid-template-columns:repeat(4,1fr);} .g3{grid-template-columns:repeat(3,1fr);} .g2{grid-template-columns:repeat(2,1fr);}
+  @media (max-width:900px){ .g4,.g3{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width:560px){ .g4,.g3,.g2{grid-template-columns:1fr;} }
+  .card{border:1px solid var(--line); border-radius:10px; padding:14px 16px; font-size:13.5px;}
+  .card h3{font-size:14px; margin-bottom:6px;}
+  .card ul{margin-left:16px; color:var(--slate);}
+  .card li{margin-bottom:3px;}
+  .card .note{font-size:12px; color:var(--muted); margin-top:8px; font-style:italic;}
+  .t{display:inline-block; font-family:Consolas, monospace; font-size:11.5px; background:var(--slate-bg); border:1px solid var(--line); border-radius:5px; padding:1px 6px; color:var(--slate);}
+  .t-blue{background:var(--blue-bg); border-color:#bfdbfe; color:var(--blue);}
+  .t-green{background:var(--green-bg); border-color:#a7f3d0; color:var(--green);}
+  .t-amber{background:var(--amber-bg); border-color:#fde68a; color:#92400e;}
+  .t-purple{background:var(--purple-bg); border-color:#ddd6fe; color:var(--purple);}
+  .pipeline{display:flex; flex-wrap:wrap; align-items:stretch; gap:8px;}
+  .pipe-step{flex:1; min-width:130px; background:var(--slate-bg); border:1px solid var(--line); border-radius:9px; padding:10px 12px; text-align:center; position:relative;}
+  .pipe-step b{display:block; font-size:12.5px; margin-bottom:2px;}
+  .pipe-step span{font-size:11px; color:var(--muted);}
+  .pipe-step:not(:last-child)::after{content:"→"; position:absolute; right:-11px; top:50%; transform:translateY(-50%); color:var(--slate); font-weight:700; z-index:2;}
+  .flowline{display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px; font-size:13px; font-weight:600; color:var(--slate);}
+  .flowbox{background:var(--slate-bg); border:1px solid var(--line); border-radius:8px; padding:8px 14px;}
+  .flowline .sep{color:var(--blue); font-size:16px;}
+  .accent-blue{border-left:4px solid var(--blue);} .accent-green{border-left:4px solid var(--green);}
+  .accent-amber{border-left:4px solid var(--amber);} .accent-purple{border-left:4px solid var(--purple);}
+  .accent-teal{border-left:4px solid var(--teal);} .accent-rose{border-left:4px solid var(--rose);}
+  table.rbac{width:100%; border-collapse:collapse; font-size:12.5px; margin-top:8px;}
+  table.rbac th, table.rbac td{border:1px solid var(--line); padding:7px 9px; text-align:left; vertical-align:top;}
+  table.rbac th{background:var(--slate-bg); font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--slate);}
+  .facts{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:4px;}
+  @media (max-width:900px){ .facts{grid-template-columns:repeat(2,1fr);} }
+  .fact{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; text-align:center;}
+  .fact b{display:block; font-size:24px; letter-spacing:-.5px;}
+  .fact span{font-size:12px; color:var(--muted);}
+  footer{text-align:center; color:var(--muted); font-size:12px; margin-top:34px;}
+  @media print{ body{background:#fff; padding:0;} .stage{box-shadow:none; break-inside:avoid;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>PursuitNova — How Data Flows Through the Platform</h1>
+    <p class="sub">Management overview · JSAN Consulting business development &amp; revenue platform · October 2026</p>
+  </header>
+
+  <div class="legend">
+    <span class="chip"><span class="dot" style="background:var(--green)"></span>1 · Data Entry</span>
+    <span class="chip"><span class="dot" style="background:var(--blue)"></span>2 · API &amp; Security Gateway</span>
+    <span class="chip"><span class="dot" style="background:var(--amber)"></span>3 · Business Processing</span>
+    <span class="chip"><span class="dot" style="background:var(--purple)"></span>4 · Database (~50 tables)</span>
+    <span class="chip"><span class="dot" style="background:var(--teal)"></span>5 · Reporting &amp; Analytics</span>
+    <span class="chip"><span class="dot" style="background:var(--rose)"></span>External Feeds</span>
+  </div>
+
+  <!-- STAGE 1 -->
+  <div class="stage">
+    <span class="tag" style="background:var(--green-bg); color:var(--green);">Stage 1 · Where data comes from</span>
+    <h2 class="stage-title">Data Entry — four sources feed the platform</h2>
+    <p class="stage-sub">Every number on a dashboard ultimately starts in one of these places.</p>
+    <div class="grid g4">
+      <div class="card accent-green">
+        <h3>Team Data Entry</h3>
+        <ul>
+          <li>Prospects, companies, contacts</li>
+          <li>Meetings &amp; Minutes of Meeting (MoM)</li>
+          <li>Actions / follow-ups, opportunities</li>
+          <li>Partnerships &amp; RFP records</li>
+        </ul>
+        <div class="note">React forms → secure <span class="t t-blue">/api</span> endpoints, one pipeline for Prospects and a fully separate one for Partnerships.</div>
+      </div>
+      <div class="card accent-green">
+        <h3>Bulk Uploads</h3>
+        <ul>
+          <li>CSV import of prospects &amp; lists</li>
+          <li>Document uploads (MoM attachments, RFP files stored safely in the database)</li>
+          <li>KPI monthly submissions</li>
+        </ul>
+        <div class="note">Every upload is validated row-by-row before saving.</div>
+      </div>
+      <div class="card accent-green">
+        <h3>Microsoft 365 Integration</h3>
+        <ul>
+          <li>Connect Outlook mail &amp; calendars via company login (OAuth)</li>
+          <li>Scheduled meetings land in the Meetings view</li>
+          <li>Send follow-up emails from within PursuitNova</li>
+        </ul>
+        <div class="note">Refresh tokens are encrypted at rest; each user connects their own mailbox.</div>
+      </div>
+      <div class="card accent-rose">
+        <h3>External Feeds</h3>
+        <ul>
+          <li><b>Currency rates</b> — exchangerate-api.com refreshes FX rates once per day automatically</li>
+          <li>Admin can also set FX rates by hand if the feed is down</li>
+        </ul>
+        <div class="note">This is what lets a deal in INR, GBP or EUR roll up into one corporate currency.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="a">↓</span><span class="lbl">HTTPS request · JSON payload · session cookie + CSRF token</span></div>
+
+  <!-- STAGE 2 -->
+  <div class="stage">
+    <span class="tag" style="background:var(--blue-bg); color:var(--blue);">Stage 2 · The gate</span>
+    <h2 class="stage-title">API &amp; Security Gateway — nothing reaches data without passing five checks</h2>
+    <div class="pipeline">
+      <div class="pipe-step"><b>Session</b><span>JWT cookie login, optional MFA</span></div>
+      <div class="pipe-step"><b>CSRF check</b><span>token proves the request came from the app</span></div>
+      <div class="pipe-step"><b>Role permission</b><span>Super Admin → BD Executive, 8 roles</span></div>
+      <div class="pipe-step"><b>Data scope</b><span>self / team / all — managers see their reporting tree</span></div>
+      <div class="pipe-step"><b>Field-level rules</b><span>e.g. Presales cannot view final deal amounts</span></div>
+    </div>
+    <p class="stage-sub" style="margin:14px 0 0;">FastAPI backend (~130 endpoints). Every read and write — not just edits — passes this gate, and every action is written to an audit log.</p>
+  </div>
+
+  <div class="arrow"><span class="a">↓</span><span class="lbl">validated business operation</span></div>
+
+  <!-- STAGE 3 -->
+  <div class="stage">
+    <span class="tag" style="background:var(--amber-bg); color:#92400e;">Stage 3 · The brain</span>
+    <h2 class="stage-title">Business Processing — calculations and automation applied to raw entries</h2>
+    <div class="grid g4">
+      <div class="card accent-amber">
+        <h3>Currency Normalization (FX)</h3>
+        <ul><li>Each deal keeps its local currency</li>
+        <li>Daily rates convert everything to the corporate currency</li>
+        <li>Region-based defaults assigned to new prospects</li></ul>
+        <div class="note">Guarantees like-for-like revenue totals across countries.</div>
+      </div>
+      <div class="card accent-amber">
+        <h3>Pipeline &amp; Forecast Math</h3>
+        <ul><li>Weighted value = amount × win probability</li>
+        <li>Stage-based pipeline rollups</li>
+        <li>Targets vs actuals by owner and region</li></ul>
+      </div>
+      <div class="card accent-amber">
+        <h3>KPI Engine</h3>
+        <ul><li>Monthly templates, targets &amp; actuals per person</li>
+        <li>Submission → admin review → feedback loop</li></ul>
+      </div>
+      <div class="card accent-amber">
+        <h3>Workflow Automation</h3>
+        <ul><li>Rules generate notifications (overdue actions, stage changes)</li>
+        <li>Business + security audit trail on every event</li></ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span class="a">↓</span><span class="lbl">SQLAlchemy transactions</span></div>
+
+  <!-- STAGE 4 -->
+  <div class="stage">
+    <span class="tag" style="background:var(--purple-bg); color:var(--purple);">Stage 4 · The source of truth</span>
+    <h2 class="stage-title">Central Database — PostgreSQL in production (~50 tables)</h2>
+    <div class="grid g3">
+      <div class="card accent-purple">
+        <h3>Revenue pipeline</h3>
+        <ul><li>Companies → Contacts → Leads (prospects)</li>
+        <li>Meetings &amp; MoM → Actions</li>
+        <li>Opportunities + teams → forecast data</li></ul>
+      </div>
+      <div class="card accent-purple">
+        <h3>Parallel pipelines</h3>
+        <ul><li>Partnerships: independent company→opportunity chain (cannot affect Prospect reporting)</li>
+        <li>RFPs with secured document storage</li>
+        <li>Supplier Network targets</li></ul>
+      </div>
+      <div class="card accent-purple">
+        <h3>People, performance &amp; control</h3>
+        <ul><li>Users, roles, permissions, org hierarchy</li>
+        <li>KPI templates / targets / actuals / submissions</li>
+        <li>FX rates, org settings, notifications, saved views</li>
+        <li>Audit logs &amp; security logs</li></ul>
+      </div>
+    </div>
+    <p class="stage-sub" style="margin-top:14px;">One database, strictly access-controlled. Backed up centrally; schema changes go through managed migrations (Alembic), never ad-hoc edits.</p>
+  </div>
+
+  <div class="arrow"><span class="a">↑</span><span class="lbl">aggregated API responses, filtered per user's scope — shown as the direction data travels back up to screens</span></div>
+
+  <!-- STAGE 5 -->
+  <div class="stage">
+    <span class="tag" style="background:var(--teal-bg); color:var(--teal);">Stage 5 · Seeing the data</span>
+    <h2 class="stage-title">Reporting &amp; Dashboards — the same data, shaped for each audience</h2>
+    <div class="grid g4">
+      <div class="card accent-teal">
+        <h3>Dashboard / Revenue Command Center</h3>
+        <ul><li>Live pipeline KPIs, all figures converted to corporate currency</li><li>Personal widget layout saved per user</li></ul>
+      </div>
+      <div class="card accent-teal">
+        <h3>Leadership Analytics</h3>
+        <ul><li>Period reports across teams &amp; regions</li><li>Winner/loss trends for management review</li></ul>
+      </div>
+      <div class="card accent-teal">
+        <h3>Forecast &amp; KPI views</h3>
+        <ul><li>Weighted pipeline by stage</li><li>Monthly KPI scorecards with review trail</li></ul>
+      </div>
+      <div class="card accent-teal">
+        <h3>Exports &amp; Lead 360</h3>
+        <ul><li>Permission-gated CSV export</li><li>Full history of any single prospect</li></ul>
+      </div>
+    </div>
+    <p class="stage-sub" style="margin:14px 0 0;">A manager and an executive opening the same dashboard see <b>different numbers</b> — the scope engine filters at query time, so no screen ever shows data the viewer shouldn't see.</p>
+  </div>
+
+  <div class="arrow"><span class="a">⇅</span><span class="lbl">one request/response loop, end to end</span></div>
+
+  <!-- End-to-end -->
+  <div class="stage">
+    <span class="tag" style="background:var(--slate-bg); color:var(--slate);">End-to-end summary</span>
+    <h2 class="stage-title">One example: a deal logged in Mumbai appears in global revenue</h2>
+    <div class="flowline">
+      <span class="flowbox">BD Executive enters opportunity (₹ amount)</span><span class="sep">→</span>
+      <span class="flowbox">Security gate checks role &amp; scope</span><span class="sep">→</span>
+      <span class="flowbox">FX engine converts with daily rate</span><span class="sep">→</span>
+      <span class="flowbox">Saved to database + audit log</span><span class="sep">→</span>
+      <span class="flowbox">Rolls into manager, leadership &amp; dashboard totals</span>
+    </div>
+  </div>
+
+  <!-- Facts -->
+  <div class="facts" style="margin-top:24px;">
+    <div class="fact"><b>~130</b><span>secured API endpoints</span></div>
+    <div class="fact"><b>~50</b><span>database tables, one source of truth</span></div>
+    <div class="fact"><b>8 roles</b><span>with field-level &amp; row-level access control</span></div>
+    <div class="fact"><b>100%</b><span>of changes captured in business + security audit logs</span></div>
+  </div>
+
+  <!-- RBAC table -->
+  <div class="stage" style="margin-top:24px;">
+    <span class="tag" style="background:var(--blue-bg); color:var(--blue);">Who sees what</span>
+    <h2 class="stage-title">Access model at a glance</h2>
+    <table class="rbac">
+      <tr><th>Role</th><th>Sees</th><th>Notable limits</th></tr>
+      <tr><td><b>Super Admin / Admin</b></td><td>Everything, incl. user &amp; workflow management</td><td>Only named custodians can download RFP documents</td></tr>
+      <tr><td><b>Director</b></td><td>All CRM data, reports, forecasts, targets</td><td>No user/role administration</td></tr>
+      <tr><td><b>BD Manager / Lead</b></td><td>Their reporting tree: leads, opportunities, actions</td><td>Can reassign &amp; close within scope</td></tr>
+      <tr><td><b>BD Executive</b></td><td>Own records + shared records</td><td>No reassignment or target editing</td></tr>
+      <tr><td><b>Presales Lead</b></td><td>Assigned prospects, meetings, opportunities</td><td><b>Cannot view final deal amounts</b>; contact details read-only</td></tr>
+    </table>
+  </div>
+
+  <footer>PursuitNova v6 · React SPA + FastAPI on a single secured origin · PostgreSQL · Microsoft Graph integration · generated for management review</footer>
+</div>
+</body>
+</html>

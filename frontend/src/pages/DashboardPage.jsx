@@ -1,35 +1,101 @@
-import React,{useEffect,useMemo,useState} from 'react'
+import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
-import { money,pct } from '../lib/format'
-import { Button,ErrorBanner,Modal,SectionHeader,Spinner } from '../components/UI'
-import { Donut,ForecastBars,HorizontalBars,Legend,RevenueTrend } from '../components/Charts'
+import { money } from '../lib/format'
+import { Button,Empty,ErrorBanner,Spinner } from '../components/UI'
 import { navigate } from '../lib/router'
-import { Icon } from '../components/Icons'
 import { useAuth } from '../components/Auth'
 import { useViewCurrency } from '../lib/useViewCurrency'
 import { CurrencyPicker } from '../components/CurrencyPicker'
 
-const ALL_WIDGETS=[
-  ['trend','Revenue momentum'],['forecast','Forecast confidence'],['funnel','Opportunity funnel'],['temperature','Prospect mix'],['owners','Pipeline by owner'],['attention','Leadership attention'],['top','Top opportunities']
-]
+// The dashboard reports the business by the currency each deal was booked in, and reports exactly
+// two things about it: what has been won, and what is still in the pipeline. Everything else that
+// used to sit on this page (forecast, funnel, owners, attention, trend) lives on its own page.
+const SCOPE_LABEL={all:'All Business',team:'My Team'}
+const projects=n=>`${n} ${n===1?'project':'projects'}`
+
 export default function DashboardPage(){
- const {has}=useAuth(); const [data,setData]=useState(null); const vc=useViewCurrency(data?.summary?.currency||data?.analytics?.currency); const [error,setError]=useState(null); const [config,setConfig]=useState(false); const [widgets,setWidgets]=useState(ALL_WIDGETS.map(x=>x[0]))
- const load=async()=>{setError(null);try{const [summary,analytics,attention,prefs]=await Promise.all([api.get('/api/dashboard/summary'),api.get('/api/dashboard/analytics'),api.get('/api/dashboard/attention'),api.get('/api/dashboard/preferences')]);let saved=[];try{saved=JSON.parse(prefs.widgets_json||'[]')}catch{};if(saved.length)setWidgets(saved);setData({summary,analytics,attention})}catch(e){setError(e)}}
+ const {has,user}=useAuth(); const [data,setData]=useState(null); const [error,setError]=useState(null)
+ const vc=useViewCurrency(data?.currency)
+ const load=async()=>{setError(null);try{setData(await api.get('/api/dashboard/analytics'))}catch(e){setError(e)}}
  useEffect(()=>{load()},[])
- if(!data&&!error)return <Spinner label="Building your revenue command center"/>
- const {summary:s={},analytics:a={},attention=[]}=data||{}; const corporate=s.currency||a.currency||'USD'
- // Every figure from the API is in `corporate`; `cv` re-expresses it in the viewer's chosen currency.
- const currency=vc.view; const cv=vc.convert
- // Region-wise native currency: leadership asked to see each region in the currency its deals were
- // booked in rather than one blended corporate figure. `fx` accounts for anything that could not be
- // converted — those amounts used to be folded into the totals above as a silent zero.
- const regionCurrency=a.region_currency||[]; const fx=a.fx||{}; const missingRates=fx.missing_rates||[]
- const countLabel=n=>`${n} ${n===1?'opportunity':'opportunities'}`
- const forecastData=[{name:'Target',value:cv(s.target)},{name:'Pipeline',value:cv(s.pipeline_value)},{name:'Best Case',value:cv(s.best_case)},{name:'Commit',value:cv(s.commit)},{name:'Won',value:cv(s.closed_won_value)}]
- const funnel=(a.pipeline||[]).filter(x=>!String(x.stage).startsWith('Closed')).map(x=>({name:x.stage,value:cv(x.value),count:x.count}))
- const ownerData=(a.owner_performance||[]).map(x=>({name:x.owner,value:cv(x.pipeline)}))
- const toggle=w=>setWidgets(v=>v.includes(w)?v.filter(x=>x!==w):[...v,w])
- const savePrefs=async()=>{await api.put('/api/dashboard/preferences',{widgets});setConfig(false)}
- return <><section className="hero-dashboard"><div><span className="eyebrow hero-eyebrow">Revenue Command Center · {s.scope}</span><h1>Turn pursuit activity into <em>revenue confidence.</em></h1><p>Your live view of pipeline health, execution discipline and leadership interventions.</p></div><div className="hero-actions"><CurrencyPicker fx={vc}/><Button variant="soft" icon="settings" onClick={()=>setConfig(true)}>Configure view</Button>{has('LEAD_CREATE')&&<Button icon="plus" onClick={()=>navigate('prospects?new=1')}>New prospect</Button>}</div></section><ErrorBanner error={error} onRetry={load}/>{data&&<><div className="insight-strip"><div><span>Target achievement</span><strong>{pct(s.achievement_pct)}</strong><i><b style={{width:`${Math.min(100,s.achievement_pct||0)}%`}}/></i></div><div><span>Pipeline coverage</span><strong>{s.target?`${(s.pipeline_value/s.target).toFixed(1)}×`:'—'}</strong><small>{money(cv(s.pipeline_value),currency)} against {money(cv(s.target),currency)} target</small></div><div><span>Hot prospects</span><strong>{s.hot_leads}</strong><small>{s.active_leads} active prospects in scope</small></div><div><span>Weighted pipeline</span><strong>{money(cv(s.weighted_pipeline),currency)}</strong><small>Probability-adjusted value</small></div></div>{missingRates.length>0&&<div className="warning-callout stacked"><strong>{countLabel(fx.unconvertible_opportunities||0)} in a currency with no exchange rate</strong><span>{missingRates.join(', ')} cannot be converted, so these amounts are missing from every {currency} figure above. They are shown in their own currency below — add a rate under Admin → Currency to fold them in.</span></div>}{regionCurrency.length>0&&<section className="panel region-currency"><div className="inline-head"><div><h3>Pipeline by region &amp; currency</h3><p>Each region in the currency its deals were booked in — nothing is converted here.</p></div><span className="subtle">Corporate currency: {corporate}</span></div><div className="region-currency-grid">{regionCurrency.map(r=><article key={r.region} className="region-card"><header><strong>{r.region}</strong><span>{countLabel(r.opportunities)}</span></header><div className="region-legs">{r.currencies.map(c=><div key={c.currency} className={c.convertible?'region-leg':'region-leg is-unrated'}><span className="leg-code">{c.currency}</span><div className="leg-figures"><b>{money(c.pipeline,c.currency,false)}</b><small>open pipeline</small></div>{c.won>0&&<div className="leg-figures leg-won"><b>{money(c.won,c.currency,false)}</b><small>won</small></div>}{!c.convertible&&<span className="leg-flag" title={`No exchange rate is configured for ${c.currency}`}>no FX rate</span>}</div>)}</div><footer>{r.pipeline_corporate!=null?<span>≈ {money(cv(r.pipeline_corporate),currency,false)} in {currency}</span>:<span className="text-warning">{currency} total unavailable — {r.unconvertible.join(', ')} has no rate</span>}</footer></article>)}</div></section>}<div className="dashboard-grid">{widgets.includes('trend')&&<article className="panel span-2"><PanelTitle title="Revenue momentum" subtitle="Six-quarter pipeline creation vs closed won"/><RevenueTrend data={(a.quarter_trend||[]).map(x=>({...x,pipeline:cv(x.pipeline),won:cv(x.won)}))} currency={currency}/></article>}{widgets.includes('forecast')&&<article className="panel"><PanelTitle title="Forecast confidence" subtitle="Target to close this period"/><ForecastBars data={forecastData} currency={currency}/></article>}{widgets.includes('funnel')&&<article className="panel"><PanelTitle title="Opportunity funnel" subtitle="Open value by stage"/><HorizontalBars data={funnel} currency={currency} height={280}/></article>}{widgets.includes('temperature')&&<article className="panel"><PanelTitle title="Prospect temperature" subtitle="Where BD attention is concentrated"/><Donut data={a.temperature||[]}/><Legend items={a.temperature||[]}/></article>}{widgets.includes('owners')&&<article className="panel"><PanelTitle title="Pipeline by owner" subtitle="Leadership roll-up across the visible hierarchy"/><HorizontalBars data={ownerData} currency={currency} height={250}/></article>}{widgets.includes('attention')&&<article className="panel span-2"><PanelTitle title="Leadership attention" subtitle="Items that need intervention, not another status meeting"/><div className="attention-list">{attention.length?attention.map((x,i)=><div key={i}><span className={`risk-dot risk-${String(x.severity).toLowerCase()}`}/><div><strong>{x.company}</strong><span>{x.kind} · {x.subject}</span></div><span className="attention-owner">{x.owner}</span><b>{x.date}</b></div>):<div className="all-clear"><Icon name="check"/><div><strong>No critical intervention needed</strong><span>Execution signals are within threshold.</span></div></div>}</div></article>}{widgets.includes('top')&&<article className="panel span-2"><PanelTitle title="Top open opportunities" subtitle="Highest-value pursuits in your current scope"/><div className="top-opps">{(a.top_opportunities||[]).map(o=><button key={o.id} onClick={()=>navigate(`pipeline?opp=${o.id}`)}><div><strong>{o.company}</strong><span>{o.name}</span></div><span>{o.owner}</span><span className="forecast-tag">{o.forecast}</span><b>{money(cv(o.value),currency)}</b><Icon name="chevron"/></button>)}</div></article>}</div></>}<Modal open={config} onClose={()=>setConfig(false)} title="Configure dashboard" eyebrow="Personal view"><p className="modal-intro">Choose the decision widgets you want visible on your Revenue Command Center.</p><div className="widget-selector">{ALL_WIDGETS.map(([key,label])=><button key={key} className={widgets.includes(key)?'selected':''} onClick={()=>toggle(key)}><span className="check-box">{widgets.includes(key)&&<Icon name="check" size={15}/>}</span><span>{label}</span></button>)}</div><div className="modal-actions"><Button variant="ghost" onClick={()=>setConfig(false)}>Cancel</Button><Button onClick={savePrefs}>Save my view</Button></div></Modal></>
+ if(!data&&!error)return <Spinner label="Loading won and pipeline by currency"/>
+ const corporate=data?.currency||vc.corporate; const currency=vc.view; const cv=vc.convert
+ const rows=data?.currency_totals||[]; const fx=data?.fx||{}; const missingRates=fx.missing_rates||[]
+ // Projects this page reports under neither Won nor Pipeline. An unrecognised status is a fault,
+ // not a category: the record is in the database but counts towards nothing, which to whoever
+ // entered it looks exactly like the tool losing their work. Named here so it can be corrected.
+ const uncounted=data?.uncounted||{}; const unrecognised=uncounted.unrecognised||[]; const onHold=uncounted.on_hold||0
+ // A corporate-currency total is only honest when every currency carrying value converts; one
+ // unrated currency makes the sum a partial figure, and a partial figure must not pose as a whole.
+ const complete=rows.every(r=>r.convertible||(!r.pipeline&&!r.won))
+ const totalWon=complete?rows.reduce((n,r)=>n+(r.won_corporate||0),0):null
+ const totalPipeline=complete?rows.reduce((n,r)=>n+(r.pipeline_corporate||0),0):null
+ const wonCount=rows.reduce((n,r)=>n+r.won_count,0); const pipelineCount=rows.reduce((n,r)=>n+r.pipeline_count,0)
+ return <>
+  <section className="hero-dashboard">
+   <div>
+    <span className="eyebrow hero-eyebrow">Revenue Command Center · {SCOPE_LABEL[user?.scope_type]||'My Business'}</span>
+    <h1>Projects won and <em>projects in pipeline.</em></h1>
+    <p>Every figure in the currency the deal was booked in — nothing is blended.</p>
+   </div>
+   <div className="hero-actions">
+    <CurrencyPicker fx={vc}/>
+    {has('LEAD_CREATE')&&<Button icon="plus" onClick={()=>navigate('prospects?new=1')}>New prospect</Button>}
+   </div>
+  </section>
+  <ErrorBanner error={error} onRetry={load}/>
+  {data&&<>
+   {missingRates.length>0&&<div className="warning-callout stacked">
+    <strong>{missingRates.join(', ')} {missingRates.length===1?'has':'have'} no exchange rate</strong>
+    <span>These amounts are reported below in their own currency, but cannot be folded into a {currency} total. Add a rate under Admin → Currency.</span>
+   </div>}
+   {unrecognised.length>0&&<div className="warning-callout stacked">
+    <strong>{projects(unrecognised.length)} with a stage the app does not recognise</strong>
+    <span>They are in the system, but a stage outside the app's own list leaves them missing from the figures below — or counted in the wrong one. Open each and set its stage. The exact stored value is quoted, so a stray space shows up.</span>
+    <ul className="uncounted-list">{unrecognised.map(o=>
+     <li key={o.id}>
+      <button onClick={()=>navigate(`pipeline?opp=${o.id}`)}>{o.name}</button>
+      <span>{o.company}</span>
+      <code>{o.status?JSON.stringify(o.status):'(blank)'}</code>
+      <b>{money(o.amount,o.currency,false)}</b>
+     </li>)}
+    </ul>
+   </div>}
+   <section className="panel region-currency">
+    <div className="inline-head">
+     <div>
+      <h3>By currency</h3>
+      <p>{projects(wonCount)} won · {projects(pipelineCount)} in pipeline{onHold>0&&` · ${onHold} on hold, not shown`}</p>
+     </div>
+     <span className="subtle">Corporate currency: {corporate}</span>
+    </div>
+    {rows.length?<>
+     <div className="region-currency-grid">{rows.map(r=>
+      <article key={r.currency} className={r.convertible?'region-card':'region-card is-unrated'}>
+       <header><strong>{r.currency}</strong><span>{projects(r.won_count+r.pipeline_count)}</span></header>
+       <div className="region-legs">
+        <div className="region-leg">
+         <span className="leg-code">Won</span>
+         <div className="leg-figures leg-won"><b>{money(r.won,r.currency,false)}</b><small>{projects(r.won_count)} won</small></div>
+        </div>
+        <div className={r.convertible?'region-leg':'region-leg is-unrated'}>
+         <span className="leg-code">Pipeline</span>
+         <div className="leg-figures"><b>{money(r.pipeline,r.currency,false)}</b><small>{projects(r.pipeline_count)} in pipeline</small></div>
+         {!r.convertible&&<span className="leg-flag" title={`No exchange rate is configured for ${r.currency}`}>no FX rate</span>}
+        </div>
+       </div>
+       {r.convertible&&r.currency!==currency&&<footer>
+        ≈ {money(cv(r.won_corporate),currency,false)} won · {money(cv(r.pipeline_corporate),currency,false)} pipeline in {currency}
+       </footer>}
+      </article>)}
+     </div>
+     <footer className="currency-total">
+      {totalWon!=null
+        ?<><span>All currencies in {currency}</span><strong>{money(cv(totalWon),currency,false)} won</strong><strong>{money(cv(totalPipeline),currency,false)} in pipeline</strong></>
+        :<span className="text-warning">A combined {currency} total is unavailable — {missingRates.join(', ')} {missingRates.length===1?'has':'have'} no rate.</span>}
+     </footer>
+    </>:<Empty title="No projects yet" text="Won and pipeline figures appear here as soon as an opportunity is in your scope."/>}
+   </section>
+  </>}
+ </>
 }
-function PanelTitle({title,subtitle}){return <header className="panel-title"><div><h3>{title}</h3><p>{subtitle}</p></div></header>}
