@@ -35,6 +35,14 @@ Open the app service → **Variables** and add:
 | `CORS_ORIGINS` | your app URL, e.g. `https://pursuitnova-production.up.railway.app` |
 | `CORPORATE_CURRENCY` | `USD` (or your reporting currency) |
 | `METRICS_TOKEN` | a random value (protects `/metrics`) |
+| `EXCHANGERATE_API_KEY` | your exchangerate-api.com v6 key — **without it every converted figure stays on the seeded placeholder rates**, which overstate INR by about 16 % |
+
+Exchange rates are pulled from the provider when the service starts and then every
+`FX_AUTO_REFRESH_HOURS` (default `6`), each time only when the stored table predates today in UTC —
+so the provider is called about once a day, well inside the free tier's 1,500 a month. Leave
+`FX_AUTO_REFRESH` at its `true` default; setting it to `false` freezes the rates at whatever a
+service restart or an admin last left, and the "View in" caption on every money page will say so
+("… · not refreshed"). Admin Center → Exchange rates shows the cadence and whether a pull is due.
 
 Optional, only for a brand-new empty database where you are **not** copying existing accounts (step 6):
 

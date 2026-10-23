@@ -48,3 +48,27 @@ export function viewableCurrencies(corporate, rates) {
   const others = Object.keys(rates || {}).filter(c => c !== corporate && Number(rates[c]) > 0).sort()
   return corporate ? [corporate, ...others] : others
 }
+
+/**
+ * The viewer's own calendar day, as a comparable key.
+ *
+ * Deliberately built from the local getters rather than `toISOString()`, which would key on the UTC
+ * day: a viewer in IST would then keep yesterday's rate table until 05:30 local, and one in PST
+ * would drop it before their own midnight. The format only has to be stable and comparable.
+ */
+export function dayKey(now = new Date()) {
+  const p = n => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`
+}
+
+/**
+ * Whether a rate table fetched on `fetchedOn` should be re-fetched now.
+ *
+ * The server refreshes from the provider daily, so a tab only has to notice the day turning over —
+ * a dashboard left open over a weekend was converting at Friday's rate and captioning it as such.
+ * Never fetched (`''`/null) and a failed fetch both count as due, so a failure is retried rather
+ * than cached for the rest of the day.
+ */
+export function ratesNeedRefetch(fetchedOn, now = new Date()) {
+  return !fetchedOn || fetchedOn !== dayKey(now)
+}

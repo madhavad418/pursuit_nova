@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { convertBetween, convertFromCorporate, viewableCurrencies } from './currency.js'
+import { convertBetween, convertFromCorporate, dayKey, ratesNeedRefetch, viewableCurrencies } from './currency.js'
 
 // Live rates on 2026-10-07: one unit of each in USD.
 const RATES = { USD: 1, INR: 0.01036624, GBP: 1.32625995, EUR: 1.12523911, AED: 0.27229408 }
@@ -86,4 +86,34 @@ test('an unrated currency on either leg yields null, never a converted-looking z
 test('nullish amounts convert as zero, not NaN', () => {
   assert.equal(convertBetween(null, 'INR', 'GBP', 'USD', RATES), 0)
   assert.equal(convertBetween(undefined, 'GBP', 'GBP', 'USD', RATES), 0)
+})
+
+// ------------------------------------------------- the rate table must not freeze on an open tab
+
+test('the day key turns over at the viewer\'s local midnight, not UTC\'s', () => {
+  // 23 Oct 23:30 in a zone east of UTC is still 23 Oct for the viewer, though it may be the 24th in
+  // UTC — keying on UTC made a tab drop or keep the table a day out of step with the person reading.
+  const d = new Date(2026, 9, 23, 23, 30)
+  assert.equal(dayKey(d), '2026-10-23')
+  assert.equal(dayKey(new Date(2026, 9, 24, 0, 1)), '2026-10-24')
+})
+
+test('single-digit months and days are padded so keys compare as equal', () => {
+  assert.equal(dayKey(new Date(2027, 0, 5)), '2027-01-05')
+  assert.equal(dayKey(new Date(2027, 0, 5, 18)), dayKey(new Date(2027, 0, 5, 2)))
+})
+
+test('a table fetched today is reused; one fetched on any other day is refetched', () => {
+  const now = new Date(2026, 9, 23, 9, 0)
+  assert.equal(ratesNeedRefetch(dayKey(now), now), false)
+  assert.equal(ratesNeedRefetch('2026-10-16', now), true, 'the symptom: a tab open since the 16th')
+  assert.equal(ratesNeedRefetch('2026-10-22', now), true, 'one day behind is still behind')
+})
+
+test('a table that was never fetched, or whose fetch failed, is due', () => {
+  // A failure is never day-stamped, so it reads as "never fetched" and is retried on the next look
+  // rather than leaving the page unconvertible for the rest of the day.
+  assert.equal(ratesNeedRefetch(''), true)
+  assert.equal(ratesNeedRefetch(null), true)
+  assert.equal(ratesNeedRefetch(undefined), true)
 })

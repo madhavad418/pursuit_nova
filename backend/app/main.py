@@ -74,6 +74,13 @@ METRICS_TOKEN=os.getenv("METRICS_TOKEN", "")
 EXCHANGERATE_API_KEY=os.getenv("EXCHANGERATE_API_KEY", "").strip()
 EXCHANGERATE_API_URL=os.getenv("EXCHANGERATE_API_URL", "https://v6.exchangerate-api.com/v6").rstrip("/")
 FX_AUTO_REFRESH=os.getenv("FX_AUTO_REFRESH", "true").lower()=="true"
+# The provider publishes once a day, so a pass every six hours picks the new rates up within hours
+# of them landing. Only a pass that finds the table older than today calls out, so the cost against
+# the free tier's 1500 calls a month is one call a day, not one per pass. Floored at an hour so a
+# mis-set value cannot turn the scheduler into a hot loop, and defaulted rather than raising so a
+# typo cannot stop the app from booting.
+try: FX_AUTO_REFRESH_HOURS=max(1.0,float(os.getenv("FX_AUTO_REFRESH_HOURS","6") or 6))
+except ValueError: FX_AUTO_REFRESH_HOURS=6.0
 OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 # Only this login may retrieve (preview or download) uploaded RFP documents; every other user can see
 # that a document exists but cannot pull its bytes. Configurable for hand-over without a code change.
@@ -95,10 +102,16 @@ async def lifespan(app):
     init_db(create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower() == "true")
     global _HAS_CATEGORY
     _HAS_CATEGORY = _user_has_category()
-    # One provider call per start, and only when the stored rates predate today. Runs off-thread so
-    # a slow or unreachable provider can never hold up the boot or fail the health check.
-    threading.Thread(target=auto_refresh_fx_rates, daemon=True).start()
-    yield
+    # A guarded refresh pass at boot and one every FX_AUTO_REFRESH_HOURS after it, so a container
+    # that stays up for weeks keeps picking up each day's rates. Off-thread, so a slow or
+    # unreachable provider can never hold up the boot or fail the health check.
+    if FX_AUTO_REFRESH:
+        FX_SCHEDULER_STOP.clear()
+        threading.Thread(target=fx_refresh_scheduler, daemon=True, name="fx-refresh").start()
+    try:
+        yield
+    finally:
+        FX_SCHEDULER_STOP.set()
 
 app = FastAPI(title=f"{APP_NAME} API", version=APP_VERSION, lifespan=lifespan)
 if OTEL_EXPORTER_OTLP_ENDPOINT and TracerProvider:
@@ -168,6 +181,10 @@ def iso_utc(value):
     if value.tzinfo is None: value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def today_str(): return date.today().isoformat()
+# `fx_rates.as_of` carries the date the PROVIDER published, which is a UTC date. Freshness must be
+# judged against the same clock: comparing a UTC stamp with a local `date.today()` put a viewer east
+# of UTC a day ahead of the feed and a viewer west of it a day behind.
+def today_utc_str(): return datetime.now(timezone.utc).date().isoformat()
 def asdict(r): return dict(r._mapping) if r is not None else None
 
 def audit(user_id, entity_type, entity_id, action, details=None):
@@ -412,6 +429,12 @@ def currencies_in_use():
 
 FX_LOCK=threading.Lock()  # the boot thread and an admin click must not interleave their upserts
 MANUAL_SOURCES=("MANUAL","TREASURY")
+# Currencies the provider declined to quote on the last pass. A currency in use with no rate row is
+# normally a reason to call out, but one the provider does not carry would then re-trigger every
+# scheduled tick for ever. Remembering it caps that at the one daily call the freshness check already
+# makes — and that call still asks for it, so it picks up a rate the day the provider starts quoting
+# it. In-process only: a restart costs one extra call, which is the safe way round.
+FX_UNQUOTED:set[str]=set()
 
 def refresh_fx_rates(user_id=None, quotes=None, as_of=None, override_manual=False):
     """Pull live rates and store them as `rate_to_corporate`.
@@ -438,33 +461,76 @@ def refresh_fx_rates(user_id=None, quotes=None, as_of=None, override_manual=Fals
             if ex: execute(update(fx_rates).where(fx_rates.c.id==ex["id"]).values(**vals))
             else: execute(insert(fx_rates).values(currency=code,**vals))
             updated.append(code)
+        FX_UNQUOTED.clear(); FX_UNQUOTED.update(unsupported)  # replaced, so a newly quoted code drops out
     return {"provider":FX_PROVIDER,"base":corp,"as_of":as_of,"updated":updated,"unsupported":unsupported,"kept_manual":kept}
 
-def auto_refresh_fx_rates():
-    """Best-effort refresh at startup, at most once a day. Never allowed to break the boot."""
+def fx_managed_rows():
+    """The rate rows a provider refresh would actually rewrite.
+
+    That is every row except the corporate base (always 1.0 by definition) and the hand-entered
+    MANUAL/TREASURY ones, which a refresh deliberately leaves alone. Freshness has to be judged on
+    exactly this set, or the guard measures rows the refresh was never going to touch.
+    """
+    corp=norm_currency(corporate_currency())
+    return [r for r in rows(select(fx_rates.c.currency,fx_rates.c.as_of,fx_rates.c.source))
+            if norm_currency(r["currency"])!=corp and r.get("source") not in MANUAL_SOURCES]
+
+def fx_refresh_due():
+    """Whether asking the provider now would change anything — the one guard before every call.
+
+    Judged on the OLDEST managed row, which is also the date the "view in" caption shows. Judging on
+    the newest let a single fresh row mask a table that had not been refreshed in a week: an admin
+    PUT re-stamps the corporate base with today's date, so after any rate edit the guard read
+    "current" while the caption read the real, week-old date and said "not refreshed" forever.
+    """
+    managed=fx_managed_rows()
+    if not managed: return False  # nothing the provider owns, so nothing a call could update
+    # Seeded placeholders carry today's date, so freshness alone would skip them forever.
+    if any(r.get("source") in ("DEFAULT","DEMO-SEED") for r in managed): return True
+    if currencies_in_use()-set(fx_map())-FX_UNQUOTED: return True  # a currency first used since the last pass
+    dates=[iso_date(r["as_of"]) for r in managed]
+    if any(d is None for d in dates): return True  # an unreadable as_of is replaced, never trusted
+    return min(dates)<today_utc_str()
+
+def auto_refresh_fx_rates(delays=(0,15,45)):
+    """One best-effort refresh pass, taken only when `fx_refresh_due()`. Never raises.
+
+    It runs on a daemon thread — at boot and then on every scheduler tick — so a provider outage has
+    to surface as a log line and an audit row and nothing else. `delays` is the retry ladder: a
+    shared cloud egress IP can trip the provider's per-IP throttle and a cold container can lose a
+    DNS lookup, both worth retrying at boot; a scheduled tick passes a single attempt because the
+    next tick is only hours away and the free tier's monthly quota is not worth spending on retries.
+    The messages are ours (status/class only), never the provider's raw text, so no key leaks.
+    """
     try:
         if not (FX_AUTO_REFRESH and fx_provider_configured()): return
-        stored=rows(select(fx_rates.c.as_of,fx_rates.c.source))
-        newest=max([iso_date(r["as_of"]) for r in stored if iso_date(r.get("as_of"))], default="")
-        # Seeded placeholders carry today's date, so freshness alone would skip them forever.
-        placeholders=any(r.get("source") in ("DEFAULT","DEMO-SEED") for r in stored)
-        unrated=currencies_in_use()-set(fx_map())  # a currency first used today, before any boot
-        today_utc=datetime.now(timezone.utc).date().isoformat()  # the provider stamps UTC dates
-        if newest>=today_utc and not placeholders and not unrated: return
-        # A shared cloud egress IP can trip the provider's per-IP throttle, and a cold container can
-        # lose a DNS lookup: try a few times before giving up, and leave a readable reason behind.
-        # The messages are ours (status/class only), never the provider's raw text, so no key leaks.
+        if not fx_refresh_due(): return
         last=None
-        for attempt,delay in enumerate((0,15,45),1):
+        for attempt,delay in enumerate(delays,1):
             if delay: time.sleep(delay)
             try:
                 result=refresh_fx_rates(); audit(None,"currency",None,"AUTO-REFRESH",{**result,"attempt":attempt})
                 logger.info("fx auto-refresh (attempt %s): %s", attempt, result); return
             except HTTPException as e:
                 last=f"{e.status_code}: {e.detail}"; logger.warning("fx auto-refresh attempt %s failed: %s", attempt, last)
-        audit(None,"currency",None,"AUTO-REFRESH-FAILED",{"reason":last,"attempts":attempt})
+        audit(None,"currency",None,"AUTO-REFRESH-FAILED",{"reason":last,"attempts":len(delays)})
     except Exception as e:
         logger.warning("fx auto-refresh skipped: %s: %s", e.__class__.__name__, (str(e)[:200].replace(EXCHANGERATE_API_KEY,"<key>") if EXCHANGERATE_API_KEY else str(e)[:200]))
+
+FX_SCHEDULER_STOP=threading.Event()  # set on shutdown so a reload does not leave the loop running
+
+def fx_refresh_scheduler(stop=None):
+    """A refresh pass at boot, then one every FX_AUTO_REFRESH_HOURS for as long as the app runs.
+
+    Refreshing only at boot was the whole of "Provider rates · 16 Oct 2026 · not refreshed": a
+    container up since the 16th never asked the provider again, so every converted figure on every
+    money page spent a week on week-old rates while the caption truthfully said so. The pass itself
+    is guarded, so a tick that finds the table already current costs one query and no provider call.
+    """
+    stop=stop if stop is not None else FX_SCHEDULER_STOP
+    auto_refresh_fx_rates()
+    while not stop.wait(FX_AUTO_REFRESH_HOURS*3600):
+        auto_refresh_fx_rates(delays=(0,))
 
 def region_currency_breakdown(lead_list, opp_list, rates):
     """Pipeline and won totals per region, each kept in the opportunity's OWN currency.
@@ -2209,7 +2275,8 @@ def currency_settings(u=Depends(require_perm("FORECAST_VIEW"))):
     stale=[r["currency"] for r in rates if r.get("source") in ("DEFAULT","DEMO-SEED")]
     manual=[r["currency"] for r in rates if r.get("source") in MANUAL_SOURCES]
     return {"corporate_currency":corp,"rates":rates,
-        "provider":{"name":FX_PROVIDER,"configured":fx_provider_configured(),"auto_refresh":FX_AUTO_REFRESH},
+        "provider":{"name":FX_PROVIDER,"configured":fx_provider_configured(),"auto_refresh":FX_AUTO_REFRESH,
+            "every_hours":FX_AUTO_REFRESH_HOURS,"refresh_due":fx_refresh_due()},
         "stale_rates":stale,"manual_rates":manual,
         "warning":"Rates still on their seeded placeholder values must be replaced with live or treasury-approved rates before they are relied on." if stale else ""}
 
@@ -2232,7 +2299,7 @@ def currency_rates(u=Depends(current_user)):
     return {"corporate_currency":corp,"rates":rates,"as_of":as_of,
         "sources":sorted({r["source"] for r in stored if r.get("source")}),
         "live":bool(stored) and all(r.get("source")==FX_PROVIDER for r in stored),
-        "stale":bool(as_of) and (date.today()-date.fromisoformat(as_of)).days>2,
+        "stale":bool(as_of) and (date.fromisoformat(today_utc_str())-date.fromisoformat(as_of)).days>2,
         "manual":manual,"placeholder":placeholder}
 
 @app.post("/api/admin/currency/refresh")

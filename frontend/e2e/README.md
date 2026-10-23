@@ -14,12 +14,20 @@ installed Chrome — no browser download.
 | `prospects.mjs` | Prospects table shows symbol + code by default; create form offers "Default for region"; edit form prefilled, saves, blank restores the default |
 | `kpi_review.mjs` | KPI Tracker → Review team: a month alone shows nobody; choosing a person loads only theirs; "All people" is an explicit opt-in |
 | `reconcile.mjs` | Open pipeline agrees across Pipeline / Dashboard / Leadership and closed-won across Dashboard / Leadership, in USD and EUR; Leadership cards name their period |
+| `rates_freshness.mjs` | Caption names today's provider date with no "not refreshed"; one shared rates request per app rather than one per hook; a turned-over day refetches once |
+
+> **Stale scripts.** `full.mjs`, `picker.mjs`, `pipeline.mjs` and `reconcile.mjs` wait on `.kpi-grid`,
+> which the dashboard simplification removed, so they time out at the login gate. `rates_freshness.mjs`
+> is current; the others need their selectors updated to the present Dashboard.
 
 ```bash
 # once: playwright-core only (drives the Chrome you already have)
 npm i --no-save playwright-core
 
 # with backend + `npm run dev` running
+node e2e/rates_freshness.mjs
+# BASE defaults to the dev server; point it at the backend to test the built bundle:
+#   BASE=http://127.0.0.1:8000 node e2e/rates_freshness.mjs
 node e2e/full.mjs && node e2e/fx.mjs && node e2e/picker.mjs && node e2e/pipeline.mjs && node e2e/smoke360.mjs && node e2e/prospects.mjs && node e2e/reconcile.mjs && node e2e/kpi_review.mjs
 ```
 

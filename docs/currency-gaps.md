@@ -43,16 +43,17 @@ Evidence shorthand: `R:` = `test_region_currency.py`, `P:` = `test_fx_provider.p
 
 | # | Criterion | Sev | Status | Evidence | Residual |
 |---|---|---|---|---|---|
-| 2.1 | Live rates from a provider rather than seeded placeholders | H | ⚠️ | exchangerate-api.com v6 wired; seeded INR 0.012 vs live 0.010366 = **15.8 % overstatement** on every INR figure before this | **True in dev only.** `EXCHANGERATE_API_KEY` is not yet set in Railway, so production is still on the seeded `DEFAULT` rows. Until it is set, every converted production figure carries that error. |
-| 2.2 | Rates refresh automatically | H | ⚠️ | `auto_refresh_fx_rates()` on a boot thread, when stale, on placeholder, **or when a currency in use has no row** (`P:…replaces_seeded_placeholders…`, `…skipped_when…current`) | **Only at startup.** A container up for weeks never refreshes; 2.10 flags it but nothing fixes it. Needs an in-process daily timer or a scheduled job (new variable, e.g. `FX_AUTO_REFRESH_HOURS`). |
+| 2.1 | Live rates from a provider rather than seeded placeholders | H | ⚠️ | exchangerate-api.com v6 wired; seeded INR 0.012 vs live 0.010366 = **15.8 % overstatement** on every INR figure before this. `EXCHANGERATE_API_KEY` set in Railway on 2026-10-23 (owner-reported) | **Not yet confirmed in production.** The variable is set, but the restart it triggers runs on `e39704c`, which refreshes at boot only. Confirm on the deployed app that Admin Center → Exchange rates shows `source: exchangerate-api.com` on every row and no placeholder warning — a `DEFAULT` row left anywhere means the boot pull did not land. |
+| 2.2 | Rates refresh automatically | H | ✅ | `fx_refresh_scheduler()` on a daemon thread: a pass at boot, then one every `FX_AUTO_REFRESH_HOURS` (default 6) for as long as the process lives. Each pass is guarded by `fx_refresh_due()` — stale, placeholder, unreadable `as_of`, **or a currency in use with no row** — so four passes a day still cost one provider call. `P:test_the_scheduler_keeps_refreshing_after_boot` (boot pass + one per tick, boot keeps the retry ladder, a tick takes one attempt), `P:…costs_no_provider_call_when_the_table_is_current`, `P:…replaces_seeded_placeholders…`, `P:…skipped_when…current` | Assumes one process: the Dockerfile runs a single uvicorn worker, so there is one scheduler. Adding `--workers N` would give N schedulers — the upserts are idempotent and the guard still holds, so the cost is up to N calls a day, not wrong rates. |
 | 2.3 | Seeded placeholders are replaced even though they carry today's date | H | ✅ | Placeholder-source check; `P:test_auto_refresh_replaces_seeded_placeholders_even_when_dated_today` | — |
 | 2.4 | Every stored rate records where it came from and when | M | ✅ | `source`, `as_of`, `updated_by`, `updated_at`; `P:test_refresh_records_provenance`; corporate row stamped `CORPORATE-BASE` | Admin table shows `as_of`/`source`, not `updated_by`/`updated_at` |
 | 2.5 | Reader can tell provider / hand-entered / placeholder on every money page | M | ✅ | `/api/currency/rates` returns `live`, `sources`, `manual`, `placeholder`; picker caption "Provider rates · 07 Oct 2026" / "Hand-entered rates …" / "Placeholder rates …" (`E:picker caption names provider rates and their date`); `P:…live_flag_tracks_provenance` | Caption is hidden when only the corporate currency has a rate (nothing to pick) |
 | 2.6 | Only currencies actually in use are refreshed | M | ✅ | `currencies_in_use()` = rate rows ∪ opportunities ∪ partner opps ∪ targets; `P:…covers_currencies_the_data_actually_uses` | A currency that *ever* had a row is refreshed forever; there is no rate-delete endpoint |
 | 2.7 | Changing the corporate currency re-bases every rate — or refuses | H | ✅ | Provider quotes for the **new** base are fetched *before* anything is written; a provider failure changes nothing (`P:test_a_failed_rebase_changes_nothing`); success re-bases and audits `REBASE` (`P:…rebases_from_the_provider`, asserts `/latest/INR` was called and USD ≈ 96 INR). Without a key the request must carry a rate for every currency in use or it is a 409 naming the gaps (`P:…needs_a_full_manual_set`) | — |
 | 2.8 | Hand-entered (treasury) rates survive a provider refresh | H | ✅ | `MANUAL`/`TREASURY` rows are kept and reported under `kept_manual`; `override_manual=True` only on a corporate re-base (old-base manual rates are meaningless); `P:test_a_hand_entered_rate_survives_a_provider_refresh` | Admin UI shows `manual_rates` but has no "release to provider" control |
-| 2.9 | Staleness is reported separately from provenance | M | ✅ | `/api/currency/rates.stale` = oldest rate > 2 days old; caption appends "· not refreshed" in amber; `P:test_rates_endpoint_flags_staleness_separately_from_provenance` | Threshold (2 days) is a constant, not configurable |
+| 2.9 | Staleness is reported separately from provenance | M | ✅ | `/api/currency/rates.stale` = oldest rate > 2 days old, measured on the UTC clock (`today_utc_str()`) because `as_of` is the provider's UTC date — a local `date.today()` put a viewer east of UTC a day ahead of the feed. Caption appends "· not refreshed" in amber; `P:test_rates_endpoint_flags_staleness_separately_from_provenance`, `P:test_the_rates_endpoint_reads_fresh_the_day_after_a_refresh` | Threshold (2 days) is a constant, not configurable |
 | 2.10 | `as_of` is always a real date, so the freshness guard cannot be defeated by free text | M | ✅ | PUT rejects `"today"` (`P:…validates_everything…`); `iso_date()` ignores non-dates everywhere they are compared; comparison uses the provider's UTC date | — |
+| 2.13 | A fresh row cannot vouch for a table that has not been refreshed | H | ✅ | The guard reads the **oldest** provider-managed row, which is the date the caption shows. It used to read the newest over all rows, so an admin rate edit — which re-stamps the corporate base with today's date — left the guard reading "current" while every provider row stayed a week behind, permanently. `fx_managed_rows()` excludes the corporate base and MANUAL/TREASURY rows for the same reason; `P:test_a_fresh_row_cannot_mask_a_table_that_has_not_been_refreshed`, `P:…is_not_due_when_the_provider_owns_nothing`, `P:test_an_unreadable_as_of_is_refreshed_rather_than_trusted` | A currency the provider does not quote keeps its old `as_of`, and `as_of` is the oldest, so one unquotable currency in use pins the caption's date. Reported per row in the admin table; see 3.7 |
 | 2.11 | Rate history is retained so a past report can be reproduced | M | 🔵 | `fx_rates` is one row per currency; a refresh overwrites. `AUTO-REFRESH`/`REFRESH`/`REBASE` audit rows carry the result but not the previous value | Finance decision: `fx_rate_history` table, or snapshot the rate onto an opportunity at close |
 | 2.12 | Historical totals use the rate at the time, not today's | M | 🔵 | `quarter_trend` and `period_report` convert with the current map | Same decision as 2.11; last quarter's number moves whenever rates do |
 
@@ -60,11 +61,11 @@ Evidence shorthand: `R:` = `test_region_currency.py`, `P:` = `test_fx_provider.p
 
 | # | Criterion | Sev | Status | Evidence | Residual |
 |---|---|---|---|---|---|
-| 3.1 | API key is never committed | H | ✅ | `backend/.env` (gitignored) only; `git grep` over tracked files and a scan of every new file finds nothing; e2e `fx.mjs` reads it from `EXCHANGERATE_API_KEY` and skips the leak assertion if unset | Production variable still to be set (2.1) |
+| 3.1 | API key is never committed | H | ✅ | `backend/.env` (gitignored) only; `git grep` over tracked files and a scan of every new file finds nothing; e2e `fx.mjs` reads it from `EXCHANGERATE_API_KEY` and skips the leak assertion if unset. Production value lives only in Railway's variables | The key was pasted into a chat/terminal session on 2026-10-23 — rotate it in Railway and in `backend/.env` if that was the live value, since shell and chat history retain it |
 | 3.2 | Key never appears in an error, log or response | H | ✅ | Errors by status/class only (`P:test_provider_failures_surface_without_the_api_key`, 7 modes); `httpx` logger pinned to WARNING so its request-URL line cannot surface; `E:fx API key never reaches the browser` when the key is in the env | — |
 | 3.3 | Provider outage cannot break boot or the health check, and a boot failure is retried and explained | H | ✅ | Daemon thread; three attempts (0 s / 15 s / 45 s) for throttling or a cold-start DNS miss; a final failure writes an `AUTO-REFRESH-FAILED` audit row with the status and message (ours, never the provider's raw text); `P:test_auto_refresh_never_raises`, `P:test_auto_refresh_retries_a_transient_failure_and_records_the_reason` | — |
 | 3.4 | Provider errors are distinguishable, and a wrong base is refused | M | ✅ | 403 / 429 / unreachable / malformed / no rates / `base_code` mismatch → 502 with a plain message | — |
-| 3.5 | Quota respected (free tier 1 500 / month) | M | ✅ | One call per start when stale, plus manual clicks; Railway `restartPolicyMaxRetries: 5` bounds a crash loop | — |
+| 3.5 | Quota respected (free tier 1 500 / month) | M | ✅ | One call a day in the steady state, not one per pass: every pass goes through `fx_refresh_due()` (`P:…costs_no_provider_call_when_the_table_is_current` — four passes, zero calls). A scheduled tick takes one attempt rather than boot's three. `FX_UNQUOTED` stops a currency the provider does not carry re-triggering every tick for ever. Plus manual clicks; Railway `restartPolicyMaxRetries: 5` bounds a crash loop | `FX_UNQUOTED` is in-process, so a restart costs one extra call — the safe way round |
 | 3.6 | Tests never hit the network | M | ✅ | `httpx.Client` patched in every provider test; `conftest.py` pops `EXCHANGERATE_API_KEY` and sets `FX_AUTO_REFRESH=false` so an exported key cannot leak into the suite | — |
 | 3.7 | A currency the provider does not quote keeps its last value and is reported | M | ✅ | `unsupported` in the refresh result; `P:…does_not_quote_is_reported_not_guessed` | — |
 | 3.8 | Concurrent refreshes (boot thread + admin click) cannot interleave | L | ✅ | `FX_LOCK` around the upsert loop | No test — a race is not reproducible in the suite |
@@ -76,7 +77,7 @@ Evidence shorthand: `R:` = `test_region_currency.py`, `P:` = `test_fx_provider.p
 | 4.1 | Region-wise native currency on the Dashboard | H | ✅ | "Pipeline by region & currency" panel; one leg per currency in its own symbol; `E:full dashboard: region panel renders`, `native currency symbols differ` | — |
 | 4.2 | A region's corporate total is withheld, not shown partial, when a leg cannot convert | H | ✅ | `pipeline_corporate: null` → "total unavailable — X has no rate"; `R:…keeps_its_real_amount_and_is_flagged` | Headline KPIs on the same page are the partial `/api/dashboard/summary` figures — the banner says so (1.4) |
 | 4.3 | "View in" picker on every page that shows converted totals | M | ✅ | Dashboard, Leadership, Forecast, **Pipeline**; choice persists (`E:picker leadership/forecast choice persists`); corporate choice stored as nothing | KPI Tracker renders no money (counts only) — nothing to wire |
-| 4.4 | Picker falls back honestly when rates are unavailable | M | ✅ | Hook takes the page's own reported currency as fallback (no hard-coded `'USD'`); on fetch failure shows "Exchange rates unavailable — figures shown in X" and converts nothing; a saved choice whose rate vanished falls back to corporate | Hook itself has no unit test (pure functions do: `JS:` 6 cases) |
+| 4.4 | Picker falls back honestly when rates are unavailable | M | ✅ | Hook takes the page's own reported currency as fallback (no hard-coded `'USD'`); on fetch failure shows "Exchange rates unavailable — figures shown in X" and converts nothing; a saved choice whose rate vanished falls back to corporate. A failed fetch is deliberately not day-stamped, so the next look retries rather than leaving the page unconvertible all day | Hook's React wiring is covered end to end (`E:rates_freshness`), not in a unit test; its pure decisions are (`JS:` 10 cases) |
 | 4.5 | Missing-rate warning on every page that converts | M | ✅ | Dashboard, Leadership, Pipeline (`E:pipeline banner matches API state`), Forecast | — |
 | 4.6 | Pipeline board column totals are converted whole-set totals, never raw amounts summed across currencies | H | ✅ | Headers read `summary.by_status[stage]` (server-side, converted, whole filtered set, not the page); `E:pipeline stage totals are the converted whole-set totals` and `a mixed-currency column is converted, not summed raw` (₹5M + ₹2.5M + AED 75K → **$98.2K**, previously "$7,575,000"); unrated deals shown as "+N unrated" | — |
 | 4.7 | Write-side currency fields are driven by corporate/rated options, never by the view currency | H | ✅ | Forecast target form (payload + dropdown), Lead360/Partnership360 create forms, Pipeline drawer — all default to corporate and list `rates` (`E:smoke360`, `E:pipeline currency options are the rated currencies`) | — |
@@ -86,6 +87,8 @@ Evidence shorthand: `R:` = `test_region_currency.py`, `P:` = `test_fx_provider.p
 | 4.11 | A masked (hidden-field) amount renders as "—", not a convincing "$0" | M | ✅ | `money(null)` → "—"; `JS:money treats null as a masked field, not a zero` | Only `amount`/`final_amount` per-deal displays are affected; aggregates are a backend concern (5.5) |
 | 4.12 | `money()` never prints `null`/`undefined`/un-normalised codes | M | ✅ | Normalises code, honours compact in the non-ISO fallback; `JS:` 4 cases | `en-US` grouping only — ₹101.1M rather than lakh/crore (product choice) |
 | 4.13 | A mis-coded currency can be corrected from the UI | L | ✅ | Pipeline drawer edit form has a Currency select and labels the amount with it (`E:pipeline currency is editable in the drawer`) | — |
+
+| 4.14 | An open tab picks up a new day's rates instead of converting at the day it was opened on | M | ✅ | `useViewCurrency` holds one shared table for the whole app, day-stamped with `dayKey()`; it re-checks on a 30-minute timer and on `visibilitychange`/`focus`, and `ratesNeedRefetch()` only lets it fetch once the viewer's local day has turned. `JS:dayKey`/`ratesNeedRefetch` (4 cases, incl. local vs UTC midnight); `E:rates_freshness a turned-over day triggers exactly one refetch`, `one rates request for the whole page`, `a second money page reuses the table` | The table is also shared, so a page mounting several hooks makes one request instead of one each — and a second money page renders with rates in hand rather than flashing the corporate currency |
 
 ## 5. Permissions, scope and audit
 
@@ -149,12 +152,22 @@ The same viewer must read the same number for the same thing on every page. Peri
 
 | Rank | Row | Sev | What | Suggested fix |
 |---|---|---|---|---|
-| 1 | 2.1 / 3.1 | H | `EXCHANGERATE_API_KEY` not set in Railway — production still on 15.8 %-wrong INR placeholder | Set the variable; the next deploy's boot refresh replaces every placeholder |
-| 2 | 2.2 | H | Rates refresh only at startup | In-process daily timer with the same guard as boot (new `FX_AUTO_REFRESH_HOURS`) |
+| 1 | 2.2 | H | The daily-refresh fix is not deployed — Railway runs `e39704c`, which refreshes at boot only, so production will drift back to a stale date within days of its last restart | Commit and deploy this change; the key being set (2.1) fixes today's rates but not tomorrow's |
+| 2 | 2.1 | H | Production not yet confirmed off the placeholder rates | Check Admin Center → Exchange rates on the deployed app for `exchangerate-api.com` on every row |
 | 3 | 2.11 / 2.12 | M | No rate history; history re-converts at today's rate | Finance decision — period-fixed rates vs live |
 | 4 | 5.5 | M | Masked `final_amount` skews that role's won totals | Decision on aggregate semantics for masked fields |
 | 5 | 6.5 | L | CSV export has no converted column | Add columns |
 | 6 | 6.2 | — | Saumya's record | Data owner to identify |
+
+**Closed since the last scoring** — 2.2 (rates refreshed only at startup, so a container up since
+16 Oct 2026 showed "Provider rates · 16 Oct 2026 · not refreshed" for a week) and the two further
+ways the same caption could stick: a fresh row masking a stale table (2.13) and an open tab never
+re-fetching (4.14).
+
+**Known stale, not currency-related** — `full.mjs`, `picker.mjs`, `pipeline.mjs` and `reconcile.mjs`
+wait on `.kpi-grid`, which the dashboard simplification (`fbeb6b1`, `d99d9f1`) removed, so they time
+out at the login gate before asserting anything. `rates_freshness.mjs` is current. The ✅ rows citing
+`E:` evidence from the stale scripts were asserted before that change, not re-run since.
 
 ## How to re-score
 
@@ -166,7 +179,11 @@ cd backend && python -m pytest tests/test_region_currency.py tests/test_fx_provi
 cd frontend && node --test src/lib/currency.test.js src/lib/format.test.js
 
 # e2e sweeps (backend + `npm run dev` running; see frontend/e2e/README.md)
+cd frontend && node e2e/rates_freshness.mjs
+# the rest currently time out on `.kpi-grid` — see "Known stale" above
 cd frontend && node e2e/full.mjs && node e2e/fx.mjs && node e2e/picker.mjs && node e2e/pipeline.mjs && node e2e/smoke360.mjs && node e2e/prospects.mjs && node e2e/reconcile.mjs && node e2e/kpi_review.mjs
 ```
 
 *Scored 2026-10-07 against the working tree after the review pass (three independent audits: backend conversion paths, frontend money rendering, adversarial audit of this rubric's own claims). Nothing committed at time of scoring.*
+
+*Re-scored 2026-10-23 for rows 2.2, 2.9, 2.13, 3.5, 4.4 and 4.14 after the daily-refresh fix. Verified against a copy of the dev database (the live one was left untouched): a table stamped 16 Oct 2026 refreshed to 23 Oct on the boot pass, GBP moving 1.32608 → 1.33923 (+0.99 % — a week of drift on every GBP figure), and `rates_freshness.mjs` green on the built bundle.*
