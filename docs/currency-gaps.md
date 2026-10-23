@@ -88,7 +88,8 @@ Evidence shorthand: `R:` = `test_region_currency.py`, `P:` = `test_fx_provider.p
 | 4.12 | `money()` never prints `null`/`undefined`/un-normalised codes | M | ✅ | Normalises code, honours compact in the non-ISO fallback; `JS:` 4 cases | `en-US` grouping only — ₹101.1M rather than lakh/crore (product choice) |
 | 4.13 | A mis-coded currency can be corrected from the UI | L | ✅ | Pipeline drawer edit form has a Currency select and labels the amount with it (`E:pipeline currency is editable in the drawer`) | — |
 
-| 4.14 | An open tab picks up a new day's rates instead of converting at the day it was opened on | M | ✅ | `useViewCurrency` holds one shared table for the whole app, day-stamped with `dayKey()`; it re-checks on a 30-minute timer and on `visibilitychange`/`focus`, and `ratesNeedRefetch()` only lets it fetch once the viewer's local day has turned. `JS:dayKey`/`ratesNeedRefetch` (4 cases, incl. local vs UTC midnight); `E:rates_freshness a turned-over day triggers exactly one refetch`, `one rates request for the whole page`, `a second money page reuses the table` | The table is also shared, so a page mounting several hooks makes one request instead of one each — and a second money page renders with rates in hand rather than flashing the corporate currency |
+| 4.14 | An open tab re-validates its rate table instead of converting at whatever it first loaded | H | ✅ | `useViewCurrency` holds one shared table for the whole app, stamped with the time it landed; `ratesAreStale()` expires it after `RATES_TTL_MS` (5 min), re-checked on a 60-second timer and on `visibilitychange`/`focus`. Picking a currency re-validates unconditionally, and the admin screens call `resetViewCurrency()` the moment they change the rates. `JS:ratesAreStale` (4 cases, incl. a backwards clock); `E:rates_freshness a table past its TTL is re-validated on focus`, `choosing a currency re-validates the table`, `one rates request for the whole page`, `a second money page reuses the table while it is fresh` | A change is visible within the TTL rather than instantly; the picker and the admin path close that window where it matters |
+| 4.15 | A rate that changes **within** a day reaches an open tab | H | ✅ | This was first built as a calendar-day check, which was wrong in the way that mattered: rates also change intra-day — an admin pressing "Refresh rates now", or the deploy that first swaps the seeded placeholders for live rates once `EXCHANGERATE_API_KEY` is set. A tab open across either kept dividing by the old rate with no outward sign, which is how a placeholder GBP of 1.27 produced Pipeline figures ~5 % above the live 1.33923. Reproduced and then fixed: the same scenario moved an "Awaiting Response" column from £485.4K to £511.8K with no reload, where before it produced zero refetches and an unchanged screen | The TTL is a constant, not configurable |
 
 ## 5. Permissions, scope and audit
 
@@ -160,9 +161,9 @@ The same viewer must read the same number for the same thing on every page. Peri
 | 6 | 6.2 | — | Saumya's record | Data owner to identify |
 
 **Closed since the last scoring** — 2.2 (rates refreshed only at startup, so a container up since
-16 Oct 2026 showed "Provider rates · 16 Oct 2026 · not refreshed" for a week) and the two further
-ways the same caption could stick: a fresh row masking a stale table (2.13) and an open tab never
-re-fetching (4.14).
+16 Oct 2026 showed "Provider rates · 16 Oct 2026 · not refreshed" for a week), a fresh row masking a
+stale table (2.13), and an open tab never re-fetching (4.14 / 4.15 — reported separately as "GBP
+shows the wrong values on the Pipeline page" once the production key was set).
 
 **Known stale, not currency-related** — `full.mjs`, `picker.mjs`, `pipeline.mjs` and `reconcile.mjs`
 wait on `.kpi-grid`, which the dashboard simplification (`fbeb6b1`, `d99d9f1`) removed, so they time
@@ -186,4 +187,13 @@ cd frontend && node e2e/full.mjs && node e2e/fx.mjs && node e2e/picker.mjs && no
 
 *Scored 2026-10-07 against the working tree after the review pass (three independent audits: backend conversion paths, frontend money rendering, adversarial audit of this rubric's own claims). Nothing committed at time of scoring.*
 
-*Re-scored 2026-10-23 for rows 2.2, 2.9, 2.13, 3.5, 4.4 and 4.14 after the daily-refresh fix. Verified against a copy of the dev database (the live one was left untouched): a table stamped 16 Oct 2026 refreshed to 23 Oct on the boot pass, GBP moving 1.32608 → 1.33923 (+0.99 % — a week of drift on every GBP figure), and `rates_freshness.mjs` green on the built bundle.*
+*Re-scored 2026-10-23 for rows 2.1, 2.2, 2.9, 2.13, 3.1, 3.5, 4.4, 4.14 and 4.15. A table stamped
+16 Oct 2026 refreshed to 23 Oct on the boot pass, GBP moving 1.32608 → 1.33923 (+0.99 % — a week of
+drift on every GBP figure), and `rates_freshness.mjs` green on the built bundle.*
+
+*Correction to that same scoring: 4.14 first shipped as a calendar-day check and was re-scored the
+same day after the intra-day case (4.15) was reported from production and reproduced. Verification
+for both rows ran against copies of the dev database; during the first round a uvicorn child process
+survived a `taskkill` on its parent and kept serving the real dev database, which took an
+auto-refresh, one test opportunity and one MANUAL GBP rate. Test servers now run on a port of their
+own and are stopped with `taskkill /T` over the whole tree.*

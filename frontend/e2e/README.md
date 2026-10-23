@@ -14,11 +14,16 @@ installed Chrome — no browser download.
 | `prospects.mjs` | Prospects table shows symbol + code by default; create form offers "Default for region"; edit form prefilled, saves, blank restores the default |
 | `kpi_review.mjs` | KPI Tracker → Review team: a month alone shows nobody; choosing a person loads only theirs; "All people" is an explicit opt-in |
 | `reconcile.mjs` | Open pipeline agrees across Pipeline / Dashboard / Leadership and closed-won across Dashboard / Leadership, in USD and EUR; Leadership cards name their period |
-| `rates_freshness.mjs` | Caption names today's provider date with no "not refreshed"; one shared rates request per app rather than one per hook; a turned-over day refetches once |
+| `rates_freshness.mjs` | Caption names today's provider date with no "not refreshed"; one shared rates request per app rather than one per hook; a table past its TTL re-validates on focus, and choosing a currency re-validates unconditionally |
 
 > **Stale scripts.** `full.mjs`, `picker.mjs`, `pipeline.mjs` and `reconcile.mjs` wait on `.kpi-grid`,
 > which the dashboard simplification removed, so they time out at the login gate. `rates_freshness.mjs`
 > is current; the others need their selectors updated to the present Dashboard.
+
+> **Stop servers by tree.** `taskkill /PID <pid> /F` on a uvicorn parent leaves its child serving the
+> port, bound to whatever `backend/.env` points at — which is the real dev database. Use
+> `taskkill /PID <pid> /T /F`, run test servers on their own port, and confirm the port is dead
+> before trusting that a restart took your `DATABASE_URL`.
 
 ```bash
 # once: playwright-core only (drives the Chrome you already have)

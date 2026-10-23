@@ -49,26 +49,27 @@ export function viewableCurrencies(corporate, rates) {
   return corporate ? [corporate, ...others] : others
 }
 
-/**
- * The viewer's own calendar day, as a comparable key.
- *
- * Deliberately built from the local getters rather than `toISOString()`, which would key on the UTC
- * day: a viewer in IST would then keep yesterday's rate table until 05:30 local, and one in PST
- * would drop it before their own midnight. The format only has to be stable and comparable.
- */
-export function dayKey(now = new Date()) {
-  const p = n => String(n).padStart(2, '0')
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`
-}
+/** How long a fetched rate table is trusted before an open tab re-validates it. */
+export const RATES_TTL_MS = 5 * 60 * 1000
 
 /**
- * Whether a rate table fetched on `fetchedOn` should be re-fetched now.
+ * Whether a rate table fetched at `fetchedAt` (epoch ms) should be re-fetched now.
  *
- * The server refreshes from the provider daily, so a tab only has to notice the day turning over —
- * a dashboard left open over a weekend was converting at Friday's rate and captioning it as such.
- * Never fetched (`''`/null) and a failed fetch both count as due, so a failure is retried rather
- * than cached for the rest of the day.
+ * This was a calendar-day check first, on the reasoning that the server only pulls from the provider
+ * once a day. That was wrong, and wrong in exactly the way that matters: rates also change *within*
+ * a day — an admin pressing "Refresh rates now", or a deploy that swaps the seeded placeholders for
+ * live rates the first time `EXCHANGERATE_API_KEY` is set. A tab open across either kept converting
+ * at the old rate with no way to notice, which showed as GBP figures ~5 % out against a placeholder
+ * rate of 1.27 vs a live 1.33923. A short TTL covers the day boundary too, so it replaces the day
+ * check rather than joining it.
+ *
+ * Never fetched (`0`/null) and a failed fetch both count as stale, so a failure is retried on the
+ * next look instead of being cached.
  */
-export function ratesNeedRefetch(fetchedOn, now = new Date()) {
-  return !fetchedOn || fetchedOn !== dayKey(now)
+export function ratesAreStale(fetchedAt, now = Date.now(), ttlMs = RATES_TTL_MS) {
+  if (!fetchedAt) return true
+  const age = now - fetchedAt
+  // A clock moved backwards (NTP correction, a laptop waking in another zone) must read as stale
+  // rather than as "fetched in the future", which would pin the table until the clock caught up.
+  return age < 0 || age >= ttlMs
 }

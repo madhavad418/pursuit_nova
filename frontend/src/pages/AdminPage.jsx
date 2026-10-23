@@ -1,5 +1,6 @@
 import React,{useEffect,useState} from 'react'
 import { api } from '../lib/api'
+import { resetViewCurrency } from '../lib/useViewCurrency'
 import { useAuth } from '../components/Auth'
 import { Button,ErrorBanner,Field,Input,Modal,Pill,SectionHeader,Select,Table } from '../components/UI'
 import { Icon } from '../components/Icons'
@@ -39,7 +40,9 @@ export default function AdminPage({onToast}){
  // Exchange rates come from the provider named in `currency.provider`; without a key configured
  // they stay on whatever was last entered by hand, so the panel says which situation you are in.
  const [fxBusy,setFxBusy]=useState(false)
- const refreshRates=async()=>{setFxBusy(true);try{const r=await api.post('/api/admin/currency/refresh',{});setCurrency(r)
+ // Drop the app-wide rate table the money pages share, or whoever just replaced these rates would
+ // switch to a money page and still be shown the ones they replaced until the cache's TTL lapsed.
+ const refreshRates=async()=>{setFxBusy(true);try{const r=await api.post('/api/admin/currency/refresh',{});setCurrency(r);resetViewCurrency()
    const n=r.refresh?.updated?.length||0; const miss=r.refresh?.unsupported||[]
    onToast?.({type:'success',message:`${n} rate${n===1?'':'s'} updated from ${r.refresh?.provider} (${r.refresh?.as_of})${miss.length?` · not quoted: ${miss.join(', ')}`:''}`})
  }catch(e){fail(e)}finally{setFxBusy(false)}}
