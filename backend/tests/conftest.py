@@ -34,3 +34,26 @@ def csrf_headers():
         token=client.cookies.get('pursuitnova_csrf')
         return {'X-CSRF-Token':token} if token else {}
     return _h
+
+
+@pytest.fixture
+def partner_opps():
+    """Every partnership opportunity the signed-in session can see, gathered over the API.
+
+    The dashboard's by-currency panel covers prospects *and* partnerships, so a test that reconciles
+    that panel against "what this user can see" needs both sides. Prospects come from
+    `/api/opportunities`; partnerships have no flat list endpoint, so they are collected from each
+    visible partnership's detail, which filters by `visible_partner_opp_ids` exactly as the dashboard
+    does.
+
+    One gap worth knowing: partnership visibility and partnership-opportunity visibility are not the
+    same set — an opportunity shared directly with a user, or one they are on the team of, is visible
+    even if the partnership around it is not. That opportunity would be missed here. Callers that
+    need exactness assert this enumeration against the endpoint's own partnership counts.
+    """
+    def _collect(client):
+        out = []
+        for p in client.get('/api/partnerships').json():
+            out.extend(client.get(f"/api/partnerships/{p['id']}").json().get('opportunities') or [])
+        return out
+    return _collect

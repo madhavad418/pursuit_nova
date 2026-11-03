@@ -25,6 +25,11 @@ export default function DashboardPage(){
  // not a category: the record is in the database but counts towards nothing, which to whoever
  // entered it looks exactly like the tool losing their work. Named here so it can be corrected.
  const uncounted=data?.uncounted||{}; const unrecognised=uncounted.unrecognised||[]; const onHold=uncounted.on_hold||0
+ // The two buckets are addressed differently: the prospect board opens a deal by its own id, while
+ // a partnership deal is reached through its Partnership 360. Ids are only unique within a bucket,
+ // so sending a partnership id to `pipeline?opp=` would silently open an unrelated prospect deal —
+ // and the list rows are keyed by bucket and id together for the same reason.
+ const openUncounted=o=>navigate(o.bucket==='partnership'?`partnership/${o.partnership_id}`:`pipeline?opp=${o.id}`)
  // A corporate-currency total is only honest when every currency carrying value converts; one
  // unrated currency makes the sum a partial figure, and a partial figure must not pose as a whole.
  const complete=rows.every(r=>r.convertible||(!r.pipeline&&!r.won))
@@ -53,8 +58,8 @@ export default function DashboardPage(){
     <strong>{projects(unrecognised.length)} with a stage the app does not recognise</strong>
     <span>They are in the system, but a stage outside the app's own list leaves them missing from the figures below — or counted in the wrong one. Open each and set its stage. The exact stored value is quoted, so a stray space shows up.</span>
     <ul className="uncounted-list">{unrecognised.map(o=>
-     <li key={o.id}>
-      <button onClick={()=>navigate(`pipeline?opp=${o.id}`)}>{o.name}</button>
+     <li key={`${o.bucket}-${o.id}`}>
+      <button onClick={()=>openUncounted(o)}>{o.name}</button>
       <span>{o.company}</span>
       <code>{o.status?JSON.stringify(o.status):'(blank)'}</code>
       <b>{money(o.amount,o.currency,false)}</b>

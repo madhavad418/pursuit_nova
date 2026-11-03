@@ -144,7 +144,13 @@ def test_analytics_exposes_currency_totals(client, login):
 
 def test_currency_totals_reconcile_with_the_region_breakdown(client, login):
     """Two views of the same opportunities: rolled up by currency, and by region then currency.
-    They are computed independently, so they are a check on each other."""
+    They are computed independently, so they are a check on each other.
+
+    The region view is prospect-only by construction - region lives on the lead - while the
+    by-currency panel also covers the partnership bucket. So the partnership split is added back
+    before comparing. Without it this passed only while no partnership deal happened to exist yet,
+    which is to say by test-ordering luck.
+    """
     client.cookies.clear()
     login(client, email='superadmin@jsan.local')
     a = client.get('/api/dashboard/analytics').json()
@@ -155,14 +161,23 @@ def test_currency_totals_reconcile_with_the_region_breakdown(client, login):
         for leg in region["currencies"]:
             expected[leg["currency"]]["pipeline"] += leg["pipeline"]
             expected[leg["currency"]]["won"] += leg["won"]
+    for leg in a["partner_currency_totals"]:
+        expected[leg["currency"]]["pipeline"] += leg["pipeline"]
+        expected[leg["currency"]]["won"] += leg["won"]
 
     for r in a["currency_totals"]:
-        assert r["pipeline"] == pytest.approx(expected[r["currency"]]["pipeline"])
-        assert r["won"] == pytest.approx(expected[r["currency"]]["won"])
+        assert r["pipeline"] == pytest.approx(expected[r["currency"]]["pipeline"]), r["currency"]
+        assert r["won"] == pytest.approx(expected[r["currency"]]["won"]), r["currency"]
 
 
 def test_currency_totals_follow_record_scope(client, login):
-    """A BD Executive sees only their own opportunities here, same as everywhere else."""
+    """A BD Executive sees only their own opportunities here, same as everywhere else.
+
+    Checked per bucket: the panel's prospect share must be exactly this user's visible prospect
+    opportunities, and the partnership share is reported separately so the two cannot mask each
+    other. Comparing the combined figure against `/api/opportunities` alone would have read a
+    partnership deal as a scope leak, or hidden one.
+    """
     client.cookies.clear()
     login(client, email='superadmin@jsan.local')
     everyone = sum(r["pipeline_count"] + r["won_count"] for r in client.get('/api/dashboard/analytics').json()["currency_totals"])
@@ -170,10 +185,11 @@ def test_currency_totals_follow_record_scope(client, login):
     login(client, email='bd.exec1@jsan.local')
     a = client.get('/api/dashboard/analytics').json()
     mine = sum(r["pipeline_count"] + r["won_count"] for r in a["currency_totals"])
+    mine_partner = sum(r["pipeline_count"] + r["won_count"] for r in a["partner_currency_totals"])
 
     visible = client.get('/api/opportunities').json()
     counted = len([o for o in visible if o["status"] == "Closed Won" or not o["status"].startswith("Closed ")])
-    assert mine == counted, "exactly the open and won opportunities this user can open"
+    assert mine - mine_partner == counted, "the prospect share is exactly this user's visible prospect deals"
     assert mine < everyone, "a BD Executive must not see the whole business"
 
 

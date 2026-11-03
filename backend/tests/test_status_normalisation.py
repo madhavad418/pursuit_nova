@@ -120,20 +120,26 @@ def test_a_counted_opportunity_is_never_reported_as_uncounted():
     assert out["unrecognised"] == [] and out["on_hold"] == 0 and out["lost"] == 0
 
 
-def test_no_visible_opportunity_is_silently_absent(client, login):
+def test_no_visible_opportunity_is_silently_absent(client, login, partner_opps):
     """The page's promise. Every opportunity in scope is either in a figure, tallied as hold/lost,
     or named as unrecognised - never simply missing.
 
     Not a partition: a stage like "closed won" is counted (as pipeline, wrongly) AND named, which is
     the point - being in a figure is no guarantee of being in the right one.
+
+    "In scope" is both buckets. The panel covers prospects and partnerships, so this walks both;
+    checking only `/api/opportunities` let a partnership deal be absent from every figure and from
+    `unrecognised` too, and still passed - which is exactly the bug it was meant to catch.
     """
     client.cookies.clear()
     login(client, email='superadmin@jsan.local')
     a = client.get('/api/dashboard/analytics').json()
-    named = {o["id"] for o in a["uncounted"]["unrecognised"]}
+    # Ids are only unique within a bucket, so `unrecognised` is matched on (bucket, id).
+    named = {(o["bucket"], o["id"]) for o in a["uncounted"]["unrecognised"]}
 
+    visible = [("prospect", o) for o in client.get('/api/opportunities').json()]             + [("partnership", o) for o in partner_opps(client)]
     counted = hold = lost = 0
-    for o in client.get('/api/opportunities').json():
+    for bucket, o in visible:
         status = str(o.get("status") or "")
         if status == "Closed Won" or not status.startswith("Closed "):
             counted += 1
@@ -142,11 +148,17 @@ def test_no_visible_opportunity_is_silently_absent(client, login):
         elif status == "Closed Lost":
             lost += 1
         else:
-            assert o["id"] in named, f"opportunity {o['id']} ({status!r}) is in no figure and unnamed"
+            assert (bucket, o["id"]) in named, f"{bucket} opportunity {o['id']} ({status!r}) is in no figure and unnamed"
 
     totals = sum(r["won_count"] + r["pipeline_count"] for r in a["currency_totals"])
     assert totals == counted, "the figures count exactly the opportunities a stage puts in them"
     assert a["uncounted"]["on_hold"] == hold and a["uncounted"]["lost"] == lost
+    # Superadmin is all-business scope, so the partnership enumeration above is complete and the
+    # equalities are exact rather than lower bounds.
+    partner_counted = sum(r["won_count"] + r["pipeline_count"] for r in a["partner_currency_totals"])
+    assert partner_counted == sum(1 for b, o in visible if b == "partnership"
+                                  and (str(o.get("status") or "") == "Closed Won"
+                                       or not str(o.get("status") or "").startswith("Closed ")))
 
 
 def test_uncounted_follows_record_scope(client, login):

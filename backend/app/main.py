@@ -622,7 +622,13 @@ def uncounted_opportunities(opp_list):
         if status not in OPPORTUNITY_STAGES:
             unrecognised.append({"id":o.get("id"),"name":o.get("name"),"company":o.get("company_name"),
                 "status":status,"currency":norm_currency(o.get("currency")) or fallback,
-                "amount":float(o.get("amount") or 0)})
+                "amount":float(o.get("amount") or 0),
+                # Prospect and partnership opportunities are separate tables with separate id
+                # sequences, so an id alone cannot tell a caller which record to open — id 7 exists
+                # in both. `partnership_id` is present only on the partnership side, so it both
+                # names the bucket and carries the id that side is addressed by.
+                "bucket":"partnership" if o.get("partnership_id") else "prospect",
+                "partnership_id":o.get("partnership_id")})
         elif status=="Closed Hold": hold+=1
         elif status=="Closed Lost": lost+=1
     return {"unrecognised":sorted(unrecognised,key=lambda x:(x["status"],x["id"] or 0)),"on_hold":hold,"lost":lost}
@@ -1985,14 +1991,30 @@ def dashboard_analytics(u=Depends(current_user)):
     # Region-wise native currency, plus an explicit account of anything the corporate-currency
     # figures above could not convert — those used to be folded in as a silent zero.
     region_currency=region_currency_breakdown(ls,os_,rates)
-    currency_totals=currency_breakdown(os_,rates)
-    uncounted=uncounted_opportunities(os_)
+    # The by-currency panel answers "what have we won and what is still in play", which is the whole
+    # business the viewer can see — and that includes the partnership bucket. Partnership deals live
+    # in their own table under their own visibility rules, so they are fetched separately and folded
+    # in here rather than by widening `opportunity_rows`, which every prospect-side figure above is
+    # built from. Before this they were simply absent: a deal entered under a partnership showed up
+    # nowhere on this page, which to whoever entered it looked like the tool losing their work.
+    pos_=partner_opportunity_rows(u)
+    all_opps=os_+pos_
+    currency_totals=currency_breakdown(all_opps,rates)
+    # The partnership contribution on its own, so a caller can see how much of the combined figure
+    # comes from partnerships, and so the two breakdowns above remain cross-checkable: the region
+    # view is prospect-only by construction (region lives on the lead), and region + partnerships
+    # must account for exactly what `currency_totals` reports.
+    partner_currency_totals=currency_breakdown(pos_,rates)
+    uncounted=uncounted_opportunities(all_opps)
     fx={"corporate_currency":corp,
-        "missing_rates":sorted({c for r in region_currency for c in r["unconvertible"]}),
+        # Region legs cover prospect deals including lost ones; the union adds every currency the
+        # combined panel cannot fold into a total, which is where partnership currencies enter.
+        "missing_rates":sorted({c for r in region_currency for c in r["unconvertible"]}
+                               | {r["currency"] for r in currency_totals if not r["convertible"]}),
         # Only deals that would contribute value: open ones and closed-won; a lost deal in an
         # unrated currency was never part of any figure.
-        "unconvertible_opportunities":sum(1 for o in os_ if (norm_currency(o.get("currency")) or corp) not in rates and (o.get("status")=="Closed Won" or not str(o.get("status") or "").startswith("Closed ")))}
-    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps,"region_currency":region_currency,"currency_totals":currency_totals,"uncounted":uncounted,"fx":fx}
+        "unconvertible_opportunities":sum(1 for o in all_opps if (norm_currency(o.get("currency")) or corp) not in rates and (o.get("status")=="Closed Won" or not str(o.get("status") or "").startswith("Closed ")))}
+    return {"currency":corp,"temperature":temperature,"source_mix":source_mix,"region_mix":region_mix,"pipeline":pipeline,"ageing":ageing_rows,"owner_performance":owner_performance,"quarter_trend":periods,"action_mix":action_mix,"top_opportunities":top_opps,"region_currency":region_currency,"currency_totals":currency_totals,"partner_currency_totals":partner_currency_totals,"uncounted":uncounted,"fx":fx}
 
 @app.get("/api/notifications")
 def list_notifications(u=Depends(current_user)):
