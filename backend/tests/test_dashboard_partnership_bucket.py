@@ -250,3 +250,60 @@ def test_the_prospect_side_figures_are_untouched_by_the_change(client, login, cs
         assert after[key] == before[key], f'{key} must stay prospect-only'
     # And the combined panel did move, so the comparison above is not vacuous.
     assert _leg(after['currency_totals'], 'USD')['pipeline'] > _leg(before['currency_totals'], 'USD')['pipeline']
+
+
+# ------------------------------------------------------------- the cross-page contract
+
+def test_the_panel_minus_partnerships_equals_the_prospect_only_pages(client, login, csrf_headers):
+    """Reported as "we are getting duplicate points".
+
+    This panel reports both books. Opportunity Pipeline, Forecast and Leadership report prospects
+    only, and deliberately still do. So the two disagree by construction, and the only thing that
+    stops the same deal reading as counted twice is that the difference is exactly the partnership
+    share the panel names. That is the contract pinned here: panel minus partnerships lands on the
+    prospect-only figures to the cent. Break it and the page is lying about one of the two.
+
+    Summed the way `/api/dashboard/summary` sums: an unrated currency has no corporate value and
+    contributes nothing on either side, rather than being guessed at.
+    """
+    pid, h = _partnership(client, login, csrf_headers, SUPER, 'Dashboard Bucket Partner I')
+    _add_opp(client, h, pid, name='Cross page pipeline', amount=300_000, currency='USD', status='Qualified')
+    _add_opp(client, h, pid, name='Cross page win', amount=120_000, currency='USD',
+             status='Closed Won', final_amount=100_000)
+
+    a = client.get('/api/dashboard/analytics').json()
+    corp = lambda rowset, key: sum((r[f'{key}_corporate'] or 0) for r in rowset)
+    panel_pipeline = corp(a['currency_totals'], 'pipeline')
+    panel_won = corp(a['currency_totals'], 'won')
+    partner_pipeline = corp(a['partner_currency_totals'], 'pipeline')
+    partner_won = corp(a['partner_currency_totals'], 'won')
+    assert partner_pipeline >= 300_000 and partner_won >= 100_000, 'the partnership share is non-zero, so this is not vacuous'
+
+    summary = client.get('/api/dashboard/summary').json()
+    board = client.get('/api/query/opportunities?page_size=100').json()['summary']
+
+    # Per-currency rounding means the two routes can differ in the last cent.
+    assert panel_pipeline - partner_pipeline == pytest.approx(summary['pipeline_value'], abs=0.05), \
+        'panel minus partnerships must equal the prospect-only open pipeline'
+    assert panel_won - partner_won == pytest.approx(summary['closed_won_value'], abs=0.05), \
+        'and the prospect-only won value'
+    assert panel_pipeline - partner_pipeline == pytest.approx(board['pipeline'], abs=0.05), \
+        'and the Opportunity Pipeline page, which reads the same prospect-only roll-up'
+
+
+def test_the_prospect_only_pages_did_not_move(client, login, csrf_headers):
+    """The other half of the contract: adding a partnership deal must leave every prospect-only
+    figure alone. If one of them quietly started counting partnerships too, the subtraction above
+    would still balance while both pages were wrong."""
+    _as(client, login, SUPER)
+    before_summary = client.get('/api/dashboard/summary').json()
+    before_board = client.get('/api/query/opportunities?page_size=100').json()['summary']
+
+    pid, h = _partnership(client, login, csrf_headers, SUPER, 'Dashboard Bucket Partner J')
+    _add_opp(client, h, pid, name='Must not reach the board', amount=650_000, currency='USD', status='Qualified')
+
+    after_summary = client.get('/api/dashboard/summary').json()
+    after_board = client.get('/api/query/opportunities?page_size=100').json()['summary']
+    for key in ('pipeline_value', 'closed_won_value', 'active_opportunities', 'weighted_pipeline', 'best_case', 'commit'):
+        assert after_summary[key] == before_summary[key], f'/api/dashboard/summary.{key} must stay prospect-only'
+    assert after_board == before_board, 'the Opportunity Pipeline roll-up must stay prospect-only'

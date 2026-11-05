@@ -21,6 +21,16 @@ export default function DashboardPage(){
  if(!data&&!error)return <Spinner label="Loading won and pipeline by currency"/>
  const corporate=data?.currency||vc.corporate; const currency=vc.view; const cv=vc.convert
  const rows=data?.currency_totals||[]; const fx=data?.fx||{}; const missingRates=fx.missing_rates||[]
+ // Prospects and Partnerships are two separate books. This panel reports both; Opportunity
+ // Pipeline, Forecast and Leadership report prospects only. So the partnership share is named on
+ // every figure it touches — without it the combined total simply disagreed with those pages and the
+ // same deal read as counted twice. Named, the two reconcile: this panel minus the partnership share
+ // is exactly what those pages show.
+ const partnerRows=data?.partner_currency_totals||[]
+ const partnerBy=Object.fromEntries(partnerRows.map(r=>[r.currency,r]))
+ const partnerWon=partnerRows.reduce((n,r)=>n+r.won_count,0)
+ const partnerPipeline=partnerRows.reduce((n,r)=>n+r.pipeline_count,0)
+ const hasPartners=partnerWon+partnerPipeline>0
  // Projects this page reports under neither Won nor Pipeline. An unrecognised status is a fault,
  // not a category: the record is in the database but counts towards nothing, which to whoever
  // entered it looks exactly like the tool losing their work. Named here so it can be corrected.
@@ -29,6 +39,16 @@ export default function DashboardPage(){
  // a partnership deal is reached through its Partnership 360. Ids are only unique within a bucket,
  // so sending a partnership id to `pipeline?opp=` would silently open an unrelated prospect deal —
  // and the list rows are keyed by bucket and id together for the same reason.
+ // Two lines, either of which may be absent: the corporate-currency equivalent when the viewer is
+ // looking in another currency, and the partnership share when this currency has one.
+ const cardFooter=r=>{
+  const p=partnerBy[r.currency]; const conv=r.convertible&&r.currency!==currency
+  if(!conv&&!p) return null
+  return <footer>
+   {conv&&<div>≈ {money(cv(r.won_corporate),currency,false)} won · {money(cv(r.pipeline_corporate),currency,false)} pipeline in {currency}</div>}
+   {p&&<div>of which partnerships: {money(p.won,r.currency,false)} won · {money(p.pipeline,r.currency,false)} pipeline</div>}
+  </footer>
+ }
  const openUncounted=o=>navigate(o.bucket==='partnership'?`partnership/${o.partnership_id}`:`pipeline?opp=${o.id}`)
  // A corporate-currency total is only honest when every currency carrying value converts; one
  // unrated currency makes the sum a partial figure, and a partial figure must not pose as a whole.
@@ -71,6 +91,7 @@ export default function DashboardPage(){
      <div>
       <h3>By currency</h3>
       <p>{projects(wonCount)} won · {projects(pipelineCount)} in pipeline{onHold>0&&` · ${onHold} on hold, not shown`}</p>
+      {hasPartners&&<p className="subtle">Prospects and partnerships together. Of these, {partnerWon} won and {partnerPipeline} in pipeline come from partnerships — Opportunity Pipeline, Forecast and Leadership count prospects only, so their totals are lower by exactly that much.</p>}
      </div>
      <span className="subtle">Corporate currency: {corporate}</span>
     </div>
@@ -89,14 +110,12 @@ export default function DashboardPage(){
          {!r.convertible&&<span className="leg-flag" title={`No exchange rate is configured for ${r.currency}`}>no FX rate</span>}
         </div>
        </div>
-       {r.convertible&&r.currency!==currency&&<footer>
-        ≈ {money(cv(r.won_corporate),currency,false)} won · {money(cv(r.pipeline_corporate),currency,false)} pipeline in {currency}
-       </footer>}
+       {cardFooter(r)}
       </article>)}
      </div>
      <footer className="currency-total">
       {totalWon!=null
-        ?<><span>All currencies in {currency}</span><strong>{money(cv(totalWon),currency,false)} won</strong><strong>{money(cv(totalPipeline),currency,false)} in pipeline</strong></>
+        ?<><span>{hasPartners?`Prospects + partnerships, in ${currency}`:`All currencies in ${currency}`}</span><strong>{money(cv(totalWon),currency,false)} won</strong><strong>{money(cv(totalPipeline),currency,false)} in pipeline</strong></>
         :<span className="text-warning">A combined {currency} total is unavailable — {missingRates.join(', ')} {missingRates.length===1?'has':'have'} no rate.</span>}
      </footer>
     </>:<Empty title="No projects yet" text="Won and pipeline figures appear here as soon as an opportunity is in your scope."/>}
