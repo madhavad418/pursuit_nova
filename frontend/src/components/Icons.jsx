@@ -22,6 +22,9 @@ const paths = {
   filter: <path d="M4 5h16l-6 7v6l-4 2v-8z"/>,
   eye: <><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></>,
   check: <path d="M5 12l4 4L19 6"/>,
+  // Reports: a sheet with ruled rows and a rising bar, so it reads as "tabular output" next to the
+  // leadership icon's analytics chart rather than duplicating it.
+  report: <><path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v6h6"/><path d="M9 17v-3"/><path d="M12 17v-6"/><path d="M15 17v-2"/></>,
   download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></>,
   mail: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>,
   lock: <><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></>,

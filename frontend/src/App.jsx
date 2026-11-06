@@ -18,8 +18,9 @@ const ForecastPage=lazy(()=>import('./pages/ForecastPage'))
 const LeadershipPage=lazy(()=>import('./pages/LeadershipPage'))
 const AdminPage=lazy(()=>import('./pages/AdminPage'))
 const KPIPage=lazy(()=>import('./pages/KPIPage'))
+const ReportsPage=lazy(()=>import('./pages/ReportsPage'))
 // Pages whose data needs a role permission; without it the page explains instead of failing.
-const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/supplier-network','COMPANY_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
+const PAGE_PERMS=[['/prospects','LEAD_VIEW'],['/lead/','LEAD_VIEW'],['/partnerships','LEAD_VIEW'],['/partnership/','LEAD_VIEW'],['/supplier-network','COMPANY_VIEW'],['/pipeline','OPPORTUNITY_VIEW'],['/forecast','FORECAST_VIEW'],['/leadership','REPORT_VIEW'],['/reports','REPORT_VIEW'],['/admin','ROLE_ADMIN']]
 
 // Keeps a crash in one page from blanking the whole app; remounts (and so resets) on navigation.
 class PageBoundary extends React.Component{
@@ -55,6 +56,7 @@ function Product(){
  else if(route.path==='/forecast')page=<ForecastPage onToast={setToast}/>
  else if(route.path==='/leadership')page=<LeadershipPage/>
  else if(route.path==='/kpi')page=<KPIPage onToast={setToast}/>
+ else if(route.path==='/reports')page=<ReportsPage onToast={setToast}/>
  else if(route.path==='/admin')page=<AdminPage onToast={setToast}/>
  else page=<DashboardPage/>
  const need=PAGE_PERMS.find(([prefix])=>route.path.startsWith(prefix))?.[1]

@@ -56,6 +56,12 @@ export default function DashboardPage(){
  const totalWon=complete?rows.reduce((n,r)=>n+(r.won_corporate||0),0):null
  const totalPipeline=complete?rows.reduce((n,r)=>n+(r.pipeline_corporate||0),0):null
  const wonCount=rows.reduce((n,r)=>n+r.won_count,0); const pipelineCount=rows.reduce((n,r)=>n+r.pipeline_count,0)
+ // Lost sits beside won because a win rate is only legible against what it was measured on. It is
+ // reported, never folded into the headline totals — it is business that went away, not business
+ // held. `complete` already guarantees every leg converts before any corporate total is shown.
+ const lostCount=rows.reduce((n,r)=>n+(r.lost_count||0),0)
+ const totalLost=complete?rows.reduce((n,r)=>n+(r.lost_corporate||0),0):null
+ const winRate=wonCount+lostCount>0?Math.round(100*wonCount/(wonCount+lostCount)):null
  return <>
   <section className="hero-dashboard">
    <div>
@@ -90,7 +96,7 @@ export default function DashboardPage(){
     <div className="inline-head">
      <div>
       <h3>By currency</h3>
-      <p>{projects(wonCount)} won · {projects(pipelineCount)} in pipeline{onHold>0&&` · ${onHold} on hold, not shown`}</p>
+      <p>{projects(wonCount)} won · {projects(lostCount)} lost · {projects(pipelineCount)} in pipeline{onHold>0&&` · ${onHold} on hold, not shown`}{winRate!=null&&` · ${winRate}% win rate`}</p>
       {hasPartners&&<p className="subtle">Prospects and partnerships together. Of these, {partnerWon} won and {partnerPipeline} in pipeline come from partnerships — Opportunity Pipeline, Forecast and Leadership count prospects only, so their totals are lower by exactly that much.</p>}
      </div>
      <span className="subtle">Corporate currency: {corporate}</span>
@@ -98,12 +104,16 @@ export default function DashboardPage(){
     {rows.length?<>
      <div className="region-currency-grid">{rows.map(r=>
       <article key={r.currency} className={r.convertible?'region-card':'region-card is-unrated'}>
-       <header><strong>{r.currency}</strong><span>{projects(r.won_count+r.pipeline_count)}</span></header>
+       <header><strong>{r.currency}</strong><span>{projects(r.won_count+r.pipeline_count+(r.lost_count||0))}</span></header>
        <div className="region-legs">
         <div className="region-leg">
          <span className="leg-code">Won</span>
          <div className="leg-figures leg-won"><b>{money(r.won,r.currency,false)}</b><small>{projects(r.won_count)} won</small></div>
         </div>
+        {(r.lost_count||0)>0&&<div className="region-leg">
+         <span className="leg-code">Lost</span>
+         <div className="leg-figures leg-lost"><b>{money(r.lost,r.currency,false)}</b><small>{projects(r.lost_count)} lost</small></div>
+        </div>}
         <div className={r.convertible?'region-leg':'region-leg is-unrated'}>
          <span className="leg-code">Pipeline</span>
          <div className="leg-figures"><b>{money(r.pipeline,r.currency,false)}</b><small>{projects(r.pipeline_count)} in pipeline</small></div>
@@ -115,7 +125,7 @@ export default function DashboardPage(){
      </div>
      <footer className="currency-total">
       {totalWon!=null
-        ?<><span>{hasPartners?`Prospects + partnerships, in ${currency}`:`All currencies in ${currency}`}</span><strong>{money(cv(totalWon),currency,false)} won</strong><strong>{money(cv(totalPipeline),currency,false)} in pipeline</strong></>
+        ?<><span>{hasPartners?`Prospects + partnerships, in ${currency}`:`All currencies in ${currency}`}</span><strong>{money(cv(totalWon),currency,false)} won</strong>{lostCount>0&&<strong className="total-lost">{money(cv(totalLost),currency,false)} lost</strong>}<strong>{money(cv(totalPipeline),currency,false)} in pipeline</strong></>
         :<span className="text-warning">A combined {currency} total is unavailable — {missingRates.join(', ')} {missingRates.length===1?'has':'have'} no rate.</span>}
      </footer>
     </>:<Empty title="No projects yet" text="Won and pipeline figures appear here as soon as an opportunity is in your scope."/>}

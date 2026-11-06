@@ -320,3 +320,17 @@
 .currency-sign{font-weight:800;margin-right:1px}
 .kpi-card .kpi-alltime{border-top:1px dashed #e3edf2;padding-top:6px;margin-top:2px;color:var(--muted)}
 .kpi-card .kpi-alltime b{color:var(--ink);font-weight:750}
+/* Lost sits beside won on the dashboard's currency cards: muted rather than alarming, because it is
+   a reported fact about closed business, not something needing attention today. */
+.leg-figures.leg-lost b{color:var(--muted)}
+.currency-total strong.total-lost{color:var(--muted)}
+/* Report generation: a filter bar that wraps on narrow screens, and a table that scrolls sideways
+   rather than squeezing columns until the figures are unreadable. */
+.report-toolbar{flex-wrap:wrap;align-items:end;gap:10px}
+.report-toolbar .field{min-width:150px;margin:0}
+.report-scroll{overflow-x:auto}
+.report-table{width:100%;border-collapse:collapse;font-size:11px}
+.report-table th,.report-table td{text-align:left;padding:8px 10px;border-bottom:1px solid #eef4f7;white-space:nowrap}
+.report-table th{font-size:9px;font-weight:750;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);position:sticky;top:0;background:#fff}
+.report-table td.num,.report-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.report-table tbody tr:hover{background:#f7fbfd}

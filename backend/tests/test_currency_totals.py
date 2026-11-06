@@ -64,10 +64,45 @@ def test_a_closed_deal_that_is_not_a_win_is_neither_won_nor_pipeline(closed):
     assert out["pipeline_count"] == 1 and out["won_count"] == 0
 
 
-def test_a_currency_with_nothing_won_and_nothing_open_is_left_out_entirely():
-    """A row of zeroes is not an answer to "what have we won and what is in play"."""
-    out = currency_breakdown([_opp(900_000, "EUR", status="Closed Lost"), _opp(10_000, "USD")], RATES)
+def test_a_currency_carrying_only_lost_business_is_now_reported():
+    """It used to be dropped. Lost is reported beside won, so a currency whose every deal was lost
+    has something to say — and silently omitting it hid losses from the page completely."""
+    out = _by_code(currency_breakdown([_opp(900_000, "EUR", status="Closed Lost"), _opp(10_000, "USD")], RATES))
+    assert set(out) == {"EUR", "USD"}
+    assert out["EUR"]["lost"] == pytest.approx(900_000.0) and out["EUR"]["lost_count"] == 1
+    assert out["EUR"]["won"] == 0 and out["EUR"]["pipeline"] == 0, "lost is not won and not in play"
+
+
+def test_a_currency_with_nothing_at_all_is_still_left_out():
+    """A row of zeroes is still not an answer. Only hold keeps a currency silent now."""
+    out = currency_breakdown([_opp(900_000, "EUR", status="Closed Hold"), _opp(10_000, "USD")], RATES)
     assert [r["currency"] for r in out] == ["USD"]
+
+
+def test_lost_is_valued_at_the_deal_amount_not_a_final_amount():
+    """There is no final amount on business that never closed, so the figure is what was in play."""
+    out = _by_code(currency_breakdown([_opp(500_000, "USD", status="Closed Lost", final=1)], RATES))["USD"]
+    assert out["lost"] == pytest.approx(500_000.0)
+    assert out["lost_corporate"] == pytest.approx(500_000.0)
+
+
+def test_lost_rides_alongside_won_and_pipeline_without_disturbing_them():
+    out = _by_code(currency_breakdown([
+        _opp(500_000, "USD", status="Closed Won", final=430_000),
+        _opp(200_000, "USD", status="Closed Lost"),
+        _opp(300_000, "USD"),
+        _opp(900_000, "USD", status="Closed Hold"),
+    ], RATES))["USD"]
+    assert (out["won"], out["won_count"]) == (pytest.approx(430_000.0), 1)
+    assert (out["lost"], out["lost_count"]) == (pytest.approx(200_000.0), 1)
+    assert (out["pipeline"], out["pipeline_count"]) == (pytest.approx(300_000.0), 1)
+    assert out["won"] + out["pipeline"] == pytest.approx(730_000.0), "hold and lost stay out of both"
+
+
+def test_an_unrated_currency_reports_its_lost_amount_without_a_corporate_figure():
+    out = _by_code(currency_breakdown([_opp(64_000, UNRATED, status="Closed Lost")], RATES))[UNRATED]
+    assert out["lost"] == pytest.approx(64_000.0)
+    assert out["lost_corporate"] is None and out["convertible"] is False
 
 
 def test_a_deal_genuinely_won_at_zero_still_counts_as_a_win():
@@ -134,11 +169,11 @@ def test_analytics_exposes_currency_totals(client, login):
         assert r["currency"] == norm_currency(r["currency"]), "codes are canonical"
         assert r["pipeline"] >= 0 and r["won"] >= 0
         assert r["pipeline_count"] >= 0 and r["won_count"] >= 0
-        assert r["pipeline_count"] or r["won_count"], "a currency with nothing to report is not listed"
+        assert r["pipeline_count"] or r["won_count"] or r["lost_count"], "a currency with nothing to report is not listed"
         if r["convertible"]:
-            assert r["pipeline_corporate"] is not None and r["won_corporate"] is not None
+            assert r["pipeline_corporate"] is not None and r["won_corporate"] is not None and r["lost_corporate"] is not None
         else:
-            assert r["pipeline_corporate"] is None and r["won_corporate"] is None
+            assert r["pipeline_corporate"] is None and r["won_corporate"] is None and r["lost_corporate"] is None
             assert r["currency"] in a["fx"]["missing_rates"]
 
 

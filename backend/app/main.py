@@ -283,6 +283,17 @@ def field_access(u, entity_type:str, field_name:str):
     r=row(select(field_permissions.c.can_view,field_permissions.c.can_edit).where(and_(field_permissions.c.role_id==row(select(users.c.role_id).where(users.c.id==u["id"]))["role_id"],field_permissions.c.entity_type==entity_type,field_permissions.c.field_name==field_name)))
     return (bool(r["can_view"]),bool(r["can_edit"])) if r else (True,True)
 
+def readonly_fields(u, entity_type:str) -> set:
+    """Fields this user's role may see but not change (same rule as field_access: no row means editable).
+
+    The counterpart to `hidden_fields`. A form that cannot ask this has to guess, and the Pipeline
+    drawer guessed wrong: it offered a Presales Lead an Amount box, took the keystrokes, and only
+    then returned "Field edit permission denied: amount" — which reads as the app being broken
+    rather than as a permission they do not have.
+    """
+    role=select(users.c.role_id).where(users.c.id==u["id"]).scalar_subquery()
+    return {r["field_name"] for r in rows(select(field_permissions.c.field_name).where(and_(field_permissions.c.role_id==role,field_permissions.c.entity_type==entity_type,field_permissions.c.can_edit==False)))}
+
 def hidden_fields(u, entity_type:str) -> set:
     """Fields this user's role may not view for an entity type (same rule as field_access: no row means visible)."""
     role=select(users.c.role_id).where(users.c.id==u["id"]).scalar_subquery()
@@ -570,31 +581,37 @@ def region_currency_breakdown(lead_list, opp_list, rates):
     return sorted(out, key=lambda x:(-x["opportunities"], x["region"]))
 
 def currency_breakdown(opp_list, rates):
-    """Won and open-pipeline totals per booking currency, each kept in that currency.
+    """Won, lost and open-pipeline totals per booking currency, each kept in that currency.
 
     The dashboard reports the business by the currency a deal was actually booked in rather than as
     one blended corporate figure, so an INR deal is reported in INR and a USD deal in USD. The
     `*_corporate` figures are attached only when that currency has a rate: an unrated currency
     reports its real amount and is flagged, instead of converting to None and reading as zero.
 
-    A currency carrying neither open pipeline nor a win is left out. This view answers "what have we
-    won and what is still in play", and a currency whose every deal was lost has no answer to give.
+    Lost is reported beside won because a win rate is only legible next to what it was measured
+    against, and because a currency whose every deal was lost is itself worth seeing — it used to be
+    dropped from this view entirely. Lost is valued at the deal's own amount: there is no final
+    amount on business that never closed, so the figure is what was in play when it went away.
+
+    A currency with no won, lost or open deals at all is left out; it has nothing to report.
     """
     fallback=norm_currency(corporate_currency())  # read once, not per opportunity
     buckets={}
     for o in opp_list:
         cur=norm_currency(o.get("currency")) or fallback
-        b=buckets.setdefault(cur,{"currency":cur,"pipeline":0.0,"won":0.0,"pipeline_count":0,"won_count":0})
+        b=buckets.setdefault(cur,{"currency":cur,"pipeline":0.0,"won":0.0,"lost":0.0,"pipeline_count":0,"won_count":0,"lost_count":0})
         status=str(o.get("status") or "")
         if status=="Closed Won": b["won"]+=float(won_amount(o) or 0); b["won_count"]+=1
+        elif status=="Closed Lost": b["lost"]+=float(o.get("amount") or 0); b["lost_count"]+=1
         elif not status.startswith("Closed "): b["pipeline"]+=float(o.get("amount") or 0); b["pipeline_count"]+=1
     out=[]
     for b in buckets.values():
-        if not b["pipeline_count"] and not b["won_count"]: continue
+        if not b["pipeline_count"] and not b["won_count"] and not b["lost_count"]: continue
         rate=rates.get(b["currency"])
-        out.append({**b,"pipeline":round(b["pipeline"],2),"won":round(b["won"],2),"convertible":rate is not None,
+        out.append({**b,"pipeline":round(b["pipeline"],2),"won":round(b["won"],2),"lost":round(b["lost"],2),"convertible":rate is not None,
             "pipeline_corporate":round(b["pipeline"]*rate,2) if rate is not None else None,
-            "won_corporate":round(b["won"]*rate,2) if rate is not None else None})
+            "won_corporate":round(b["won"]*rate,2) if rate is not None else None,
+            "lost_corporate":round(b["lost"]*rate,2) if rate is not None else None})
     # Native amounts are not comparable across currencies (7,500,000 INR is not 7,500,000 USD), so
     # the order is by corporate worth. Anything without a rate has no comparable worth and sorts
     # last by code rather than pretending to a position in the ranking.
@@ -1794,7 +1811,10 @@ def opportunity_detail(opp_id:int,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
     for f in fs: f["owner_name"]=user_name(f["owner_id"])
     tm=rows(select(opportunity_team.c.user_id,opportunity_team.c.team_role,users.c.name,roles.c.name.label("role")).select_from(opportunity_team.join(users,users.c.id==opportunity_team.c.user_id).join(roles,roles.c.id==users.c.role_id)).where(opportunity_team.c.opportunity_id==opp_id))
     docs=rows(select(documents).where(and_(documents.c.entity_type=="opportunity",documents.c.entity_id==opp_id)).order_by(documents.c.id.desc()))
-    return {"opportunity":os[0],"followups":fs,"team":tm,"documents":docs}
+    return {"opportunity":os[0],"followups":fs,"team":tm,"documents":docs,
+        # So a form can offer exactly what this user may change, instead of failing on submit.
+        "permissions":{"can_edit":can_edit_opp(u,opp_id),"can_close":"OPPORTUNITY_CLOSE" in u["permissions"],
+            "readonly_fields":sorted(readonly_fields(u,"opportunity")),"hidden_fields":sorted(hidden_fields(u,"opportunity"))}}
 
 @app.post("/api/leads/{lead_id}/opportunities")
 def add_opportunity(lead_id:int,p:Payload,u=Depends(require_csrf)):
@@ -1816,7 +1836,12 @@ def update_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
         if not can_assign(u, int(d["owner_id"])): raise HTTPException(403,"You cannot assign this opportunity to that user")
     merged={**old,**d}; status=norm_status(merged["status"])
     if "status" in d: d["status"]=status
-    if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
+    # Close permission gates the act of closing, not the record afterwards. Testing the merged status
+    # meant anyone without it was locked out of a closed deal entirely — they could not correct a
+    # remark or a follow-up date on their own won business. Moving between two closed stages is still
+    # a closing decision, so it is the status CHANGE that is gated, not merely ending up closed.
+    if status.startswith("Closed ") and "status" in d and status!=norm_status(old["status"]) and "OPPORTUNITY_CLOSE" not in u["permissions"]:
+        raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
     if "currency" in vals: vals["currency"]=norm_currency(vals["currency"]) or norm_currency(corporate_currency())
@@ -2163,6 +2188,111 @@ def global_search(q:str=Query(min_length=2),u=Depends(current_user)):
 
     results.sort(key=lambda r:r.pop("_rank"))
     return results[:100]
+
+# ── Report generation ─────────────────────────────────────────────────────────
+# A report is a saved question asked of data the caller can already see. Every dataset below reads
+# through the same row helper the matching page uses, so a report can never widen visibility, show a
+# field a role may not view, or drift from what that page reports. Columns are declared once and
+# serve both the on-screen preview and the CSV, so the two cannot disagree.
+
+def _report_money(o, rates, corp):
+    """The deal's own amount, plus its corporate equivalent when that currency has a rate.
+
+    Left blank rather than zero when it does not: a report is read as a record, and a blank is
+    obviously missing where a 0 silently understates the row and any total taken from the column.
+    """
+    v=to_corporate(o.get("amount"), o.get("currency"), rates)
+    return "" if v is None else round(v, 2)
+
+REPORT_DATASETS={
+    "opportunities":{"label":"Opportunity pipeline","date_field":"created_at","status_field":"status",
+        "stages":lambda: list(OPPORTUNITY_STAGES)},
+    "partner_opportunities":{"label":"Partnership opportunities","date_field":"created_at","status_field":"status",
+        "stages":lambda: list(OPPORTUNITY_STAGES)},
+    "prospects":{"label":"Prospects","date_field":"created_at","status_field":"status",
+        "stages":lambda: list(LEAD_STATUSES)},
+    "partnerships":{"label":"Partnerships","date_field":"created_at","status_field":"status",
+        "stages":lambda: list(LEAD_STATUSES)},
+}
+
+def _report_source(u, dataset):
+    if dataset=="opportunities": return opportunity_rows(u)
+    if dataset=="partner_opportunities": return partner_opportunity_rows(u)
+    if dataset=="prospects": return lead_rows(u)
+    if dataset=="partnerships": return partnership_rows(u)
+    raise HTTPException(400,f"Unknown report: {dataset}")
+
+def _report_columns(dataset, corp):
+    money_cols=[("amount","Amount"),("currency","Currency"),(f"amount_{corp.lower()}",f"Amount ({corp})")]
+    if dataset in ("opportunities","partner_opportunities"):
+        return [("company_name","Company"),("name","Opportunity"),("owner_name","Owner"),
+                ("status","Stage"),("forecast_category","Forecast"),*money_cols,
+                ("probability","Probability %"),("expected_close_date","Expected close"),
+                ("next_follow_up_date","Next follow-up"),("created_on","Created")]
+    return [("company_name","Company"),("owner_name","Owner"),("status","Status"),
+            ("temperature","Signal"),("source","Source"),("region","Region"),("country","Country"),
+            ("next_follow_up","Next follow-up"),("created_on","Created")]
+
+def _report_build(u, dataset, date_from="", date_to="", status="", owner_id=None, q=""):
+    cfg=REPORT_DATASETS.get(dataset)
+    if not cfg: raise HTTPException(400,f"Unknown report: {dataset}")
+    corp=norm_currency(corporate_currency()); rates=fx_map()
+    src=_report_source(u,dataset); out=[]
+    for o in src:
+        created=str(o.get(cfg["date_field"]) or "")[:10]
+        if date_from and created and created<date_from: continue
+        if date_to and created and created>date_to: continue
+        if status and str(o.get(cfg["status_field"]) or "")!=status: continue
+        if owner_id and int(o.get("owner_id") or 0)!=int(owner_id): continue
+        if q:
+            hay=" ".join(str(o.get(k) or "") for k in ("company_name","name","owner_name","remarks")).lower()
+            if q.lower() not in hay: continue
+        r=dict(o); r["created_on"]=created
+        if dataset in ("opportunities","partner_opportunities"):
+            r[f"amount_{corp.lower()}"]=_report_money(o,rates,corp)
+        out.append(r)
+    out.sort(key=lambda r: (r.get("created_on") or "", r.get("company_name") or ""), reverse=True)
+    cols=_report_columns(dataset,corp)
+    # `fx_as_of` is the oldest rate in play, the same figure the money pages caption themselves with,
+    # so a converted column in an exported file can always be dated.
+    stored=[iso_date(x["as_of"]) for x in rows(select(fx_rates.c.as_of)) if iso_date(x.get("as_of"))]
+    return {"dataset":dataset,"label":cfg["label"],"currency":corp,"columns":[{"key":k,"label":l} for k,l in cols],
+            "rows":[{k:r.get(k) for k,_ in cols} for r in out],"total":len(out),
+            "generated_at":iso_utc(utcnow()),"fx_as_of":min(stored) if stored else None}
+
+@app.get("/api/reports/options")
+def report_options(u=Depends(require_perm("REPORT_VIEW"))):
+    """What this caller may report on, and the vocabularies their filters can use."""
+    datasets=[]
+    for key,cfg in REPORT_DATASETS.items():
+        datasets.append({"key":key,"label":cfg["label"],"stages":cfg["stages"]()})
+    owners=sorted({(o.get("owner_id"),o.get("owner_name")) for o in opportunity_rows(u) if o.get("owner_id")},
+                  key=lambda x:(x[1] or "").lower())
+    return {"datasets":datasets,"owners":[{"id":i,"name":n} for i,n in owners],
+            "can_export":"DATA_EXPORT" in u["permissions"],"currency":norm_currency(corporate_currency())}
+
+@app.get("/api/reports/run")
+def report_run(dataset:str="opportunities",date_from:str="",date_to:str="",status:str="",
+               owner_id:int|None=None,q:str="",limit:int=500,u=Depends(require_perm("REPORT_VIEW"))):
+    """The on-screen preview. Capped, with the true total alongside, so a large report says so
+    rather than quietly showing a slice as if it were everything."""
+    built=_report_build(u,dataset,date_from,date_to,status,owner_id,q)
+    limit=min(max(1,limit),2000)
+    return {**built,"rows":built["rows"][:limit],"shown":min(limit,built["total"])}
+
+@app.get("/api/reports/run.csv")
+def report_run_csv(dataset:str="opportunities",date_from:str="",date_to:str="",status:str="",
+                   owner_id:int|None=None,q:str="",u=Depends(require_perm("DATA_EXPORT"))):
+    """The same report, whole, as a file. Export stays behind DATA_EXPORT exactly as it did before."""
+    built=_report_build(u,dataset,date_from,date_to,status,owner_id,q)
+    out=io.StringIO(); w=csv.writer(out)
+    w.writerow([c["label"] for c in built["columns"]])
+    for r in built["rows"]: w.writerow(["" if r.get(c["key"]) is None else r[c["key"]] for c in built["columns"]])
+    w.writerow([]); w.writerow([f"Generated {built['generated_at']}",f"{built['total']} rows",
+                                f"Amounts converted at rates as of {built['fx_as_of'] or 'unknown'}"])
+    stamp=date.today().isoformat()
+    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",
+        headers={"Content-Disposition":f"attachment; filename=pursuitnova_{dataset}_{stamp}.csv"})
 
 @app.get("/api/reports/period")
 def period_report(year:int=Query(default=date.today().year),period:str=Query(default="Q1"),region:str=Query(default=""),u=Depends(require_perm("REPORT_VIEW"))):
@@ -3436,7 +3566,12 @@ def update_partner_opportunity(opp_id:int,p:Payload,u=Depends(require_csrf)):
         if not can_assign(u, int(d["owner_id"])): raise HTTPException(403,"You cannot assign this opportunity to that user")
     merged={**old,**d}; status=norm_status(merged["status"])
     if "status" in d: d["status"]=status
-    if status.startswith("Closed ") and "OPPORTUNITY_CLOSE" not in u["permissions"]: raise HTTPException(403,"Opportunity-close permission required")
+    # Close permission gates the act of closing, not the record afterwards. Testing the merged status
+    # meant anyone without it was locked out of a closed deal entirely — they could not correct a
+    # remark or a follow-up date on their own won business. Moving between two closed stages is still
+    # a closing decision, so it is the status CHANGE that is gated, not merely ending up closed.
+    if status.startswith("Closed ") and "status" in d and status!=norm_status(old["status"]) and "OPPORTUNITY_CLOSE" not in u["permissions"]:
+        raise HTTPException(403,"Opportunity-close permission required")
     validate_outcome(status,merged)
     vals={k:d[k] for k in ("owner_id","presales_owner_id","name","service_practice","status","forecast_category","amount","currency","probability","expected_close_date","proposal_date","last_follow_up_date","next_follow_up_date","final_amount","lost_reason","hold_reason","hold_review_date","competitor","remarks") if k in d}
     if "currency" in vals: vals["currency"]=norm_currency(vals["currency"]) or norm_currency(corporate_currency())
