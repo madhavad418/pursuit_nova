@@ -142,11 +142,11 @@ export default function DashboardPage(){
      <div className="inline-head"><div><h3>Key highlights</h3><p>The same figures as above, in {currency}.</p></div></div>
      <ul className="dash-rows">
       <li><button onClick={()=>navigate('pipeline?status=Closed Won&mode=list')}>
-       <span>Won</span><b>{totalWon==null?'—':money(cv(totalWon),currency,false)}</b><small>{projects(wonCount)}</small></button></li>
+       <span>Won</span><b className="val-won">{totalWon==null?'—':money(cv(totalWon),currency,false)}</b><small>{projects(wonCount)}</small></button></li>
       <li><button onClick={()=>navigate('pipeline')}>
        <span>In pipeline</span><b>{totalPipeline==null?'—':money(cv(totalPipeline),currency,false)}</b><small>{projects(pipelineCount)}</small></button></li>
       <li><button onClick={()=>navigate('pipeline?status=Closed Lost&mode=list')}>
-       <span>Lost</span><b>{totalLost==null?'—':money(cv(totalLost),currency,false)}</b><small>{projects(lostCount)}</small></button></li>
+       <span>Lost</span><b className="val-lost">{totalLost==null?'—':money(cv(totalLost),currency,false)}</b><small>{projects(lostCount)}</small></button></li>
       <li><button onClick={()=>navigate('leadership')}>
        <span>Win rate</span><b>{winRate==null?'—':`${winRate}%`}</b><small>{wonCount} of {wonCount+lostCount} decided</small></button></li>
      </ul>

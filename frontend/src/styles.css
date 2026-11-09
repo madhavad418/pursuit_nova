@@ -381,10 +381,20 @@
 .dash-card{display:grid;align-content:start}
 .dash-rows{list-style:none;margin:0;padding:0;display:grid}
 .dash-rows>li+li{border-top:1px solid #eef4f7}
+/* A button does not inherit colour or font family, so without these the neutral figures came out
+   pure black against the panel's ink and in the browser's own font — close enough to look like a
+   mistake, which beside the by-currency card it was. */
 .dash-rows button{width:100%;display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:2px 10px;
-  border:0;background:none;text-align:left;padding:9px 2px;cursor:pointer;border-radius:8px}
+  border:0;background:none;text-align:left;padding:9px 2px;cursor:pointer;border-radius:8px;
+  color:inherit;font-family:inherit}
 .dash-rows button:hover{background:#f6fafc}
 .dash-rows span{font-size:10px;font-weight:650}
 .dash-rows b{font-size:13px;letter-spacing:-.02em;justify-self:end}
 .dash-rows small{grid-column:1/2;font-size:8px;color:var(--muted)}
 .dash-quiet{font-size:9px;color:var(--muted);padding:6px 2px}
+/* The same two tones the by-currency panel already uses for the same two things: won in green,
+   lost in muted. Borrowed rather than re-chosen, so a figure means the same thing wherever it
+   appears on the page. Overdue actions and follow-ups keep the app's own red and amber, and a
+   count of zero stays neutral — an empty day should read calm, not alarming. */
+.dash-rows b.val-won{color:var(--green)}
+.dash-rows b.val-lost{color:var(--muted)}
