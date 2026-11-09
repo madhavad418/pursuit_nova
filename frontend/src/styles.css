@@ -367,11 +367,17 @@
    page taller than the seven-column board it replaced. */
 .pipeline-region .pipeline-board{display:grid;grid-template-columns:1fr;grid-auto-flow:row;gap:8px;overflow-x:visible}
 .pipeline-region .pipeline-column{min-height:0}
-/* Flex rather than grid so the LAST row stretches too. With a grid, three cards in a two-wide band
-   leave the second row half empty; with flex-grow every row fills the band, so a stage is never
-   wider than the cards it holds. */
+/* Kanban cards keep a card's width — stretching one deal across the whole band made it read as a
+   banner rather than a card. The band hugs them instead: width:fit-content shrinks the stage to
+   exactly the cards it holds, so a stage with one deal is one card wide and nothing is left empty
+   beside it. max-width keeps the wrap inside the region column. */
+/* The band's width is set from its card count (see PipelinePage), not by fit-content: with wrapping
+   flex children, fit-content collapsed the row to a single card and then left the band wide anyway,
+   which is both complaints at once. */
+.pipeline-region .pipeline-column{max-width:100%}
+.pipeline-region .pipeline-column>header{min-width:0}
 .pipeline-region .pipeline-column>div{display:flex;flex-wrap:wrap;gap:7px;align-items:stretch}
-.pipeline-region .deal-card{flex:1 1 236px;min-width:236px}
+.pipeline-region .deal-card{flex:0 0 246px;max-width:246px}
 .pipeline-region .deal-card{margin-bottom:0;align-content:start}
 .pipeline-region .column-empty{grid-column:1/-1}
 .region-none{font-size:9px;color:var(--muted);margin:2px 2px 0;padding-top:2px}
