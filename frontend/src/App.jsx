@@ -56,7 +56,7 @@ function Product(){
  else if(route.path==='/forecast')page=<ForecastPage onToast={setToast}/>
  else if(route.path==='/leadership')page=<LeadershipPage/>
  else if(route.path==='/kpi')page=<KPIPage onToast={setToast}/>
- else if(route.path==='/reports')page=<ReportsPage onToast={setToast}/>
+ else if(route.path==='/reports')page=<ReportsPage route={route} onToast={setToast}/>
  else if(route.path==='/admin')page=<AdminPage onToast={setToast}/>
  else page=<DashboardPage/>
  const need=PAGE_PERMS.find(([prefix])=>route.path.startsWith(prefix))?.[1]

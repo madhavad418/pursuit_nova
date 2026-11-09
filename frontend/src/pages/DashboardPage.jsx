@@ -167,10 +167,10 @@ export default function DashboardPage(){
     {has('REPORT_VIEW')&&<section className="panel dash-card">
      <div className="inline-head"><div><h3>Reports</h3><p>Build a report and take it away as CSV.</p></div></div>
      <ul className="dash-rows">
-      <li><button onClick={()=>navigate('reports')}><span>Opportunity pipeline</span><b>→</b><small>prospect deals</small></button></li>
-      <li><button onClick={()=>navigate('reports')}><span>Partnership opportunities</span><b>→</b><small>partner deals</small></button></li>
-      <li><button onClick={()=>navigate('reports')}><span>Prospects</span><b>→</b><small>the prospect book</small></button></li>
-      <li><button onClick={()=>navigate('reports')}><span>Partnerships</span><b>→</b><small>the partner book</small></button></li>
+      <li><button onClick={()=>navigate('reports?dataset=opportunities')}><span>Opportunity pipeline</span><b>→</b><small>prospect deals</small></button></li>
+      <li><button onClick={()=>navigate('reports?dataset=partner_opportunities')}><span>Partnership opportunities</span><b>→</b><small>partner deals</small></button></li>
+      <li><button onClick={()=>navigate('reports?dataset=prospects')}><span>Prospects</span><b>→</b><small>the prospect book</small></button></li>
+      <li><button onClick={()=>navigate('reports?dataset=partnerships')}><span>Partnerships</span><b>→</b><small>the partner book</small></button></li>
      </ul>
     </section>}
    </div>

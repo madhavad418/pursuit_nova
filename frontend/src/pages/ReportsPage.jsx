@@ -12,9 +12,13 @@ const emptyFilters={dataset:'opportunities',date_from:'',date_to:'',status:'',ow
 // Columns holding money are right-aligned and formatted; everything else is rendered as stored.
 const isMoney=key=>key==='amount'||key.startsWith('amount_')
 
-export default function ReportsPage({onToast}){
+export default function ReportsPage({route,onToast}){
  const {has}=useAuth()
- const [options,setOptions]=useState(null); const [filters,setFilters]=useState(emptyFilters)
+ // Opened from a dashboard row, the page should already be on the report that was clicked rather
+ // than on the default one — four rows that all land on the same view are four lies.
+ const wanted=route?.query?.get('dataset')
+ const [options,setOptions]=useState(null)
+ const [filters,setFilters]=useState(()=>({...emptyFilters,...(wanted?{dataset:wanted}:{})}))
  const [data,setData]=useState(null); const [error,setError]=useState(null); const [busy,setBusy]=useState(false)
  const set=(k,v)=>setFilters(f=>({...f,[k]:v,...(k==='dataset'?{status:''}:{})}))
 
