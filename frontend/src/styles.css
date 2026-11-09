@@ -353,3 +353,9 @@
    mostly nothing. Inside a region the column starts short and grows with its cards. */
 .pipeline-region .pipeline-column{min-height:132px}
 .pipeline-region .column-empty{padding:16px 0}
+/* With only the occupied stages shown, a region's column count varies, so the grid can no longer be
+   seven fixed tracks — two columns stretched across seven of them looked nothing like the board
+   beside it. Columns keep a steady width whatever the region holds, left-aligned, and scroll
+   sideways when a region genuinely has many stages in play. */
+.pipeline-region .pipeline-board{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:minmax(238px,296px);justify-content:start}
+.region-none{font-size:9px;color:var(--muted);margin:2px 2px 0;padding-top:2px}
