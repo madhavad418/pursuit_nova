@@ -337,11 +337,15 @@
 /* The opportunity board is grouped by region: a quiet band names the region, the stage columns sit
    under it unchanged. The band is sticky so the region stays identifiable while a wide board is
    scrolled sideways. */
-.pipeline-region{margin-bottom:18px}
-.region-band{display:flex;align-items:baseline;gap:10px;padding:4px 2px 9px;position:sticky;left:0}
+/* Regions sit side by side, each its own column; inside a column the stages run down the page. So
+   the board reads across by region and down by stage, and two regions can be compared at a glance
+   rather than by scrolling between them. More regions than fit scroll sideways. */
+.pipeline-regions{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(300px,1fr);gap:16px;align-items:start;overflow-x:auto;padding-bottom:10px;max-width:100%;min-width:0}
+.pipeline-region{margin-bottom:0;min-width:0}
+.region-band{display:flex;align-items:baseline;gap:10px;padding:4px 2px 9px}
 .region-band h3{font-size:12px;letter-spacing:-.01em;margin:0}
 .region-band span{font-size:10px;color:var(--muted)}
-.pipeline-region+.pipeline-region .region-band{border-top:1px solid var(--line);padding-top:14px}
+.pipeline-region+.pipeline-region{border-left:1px solid var(--line);padding-left:16px}
 /* The stage sits at the foot of the deal card, under a hairline, rather than at the top next to the
    company. At the top it competed with the company name for the first glance and — in a column
    already headed by that stage — read as the card's title. At the foot it answers "what stage is
