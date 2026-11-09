@@ -2633,35 +2633,56 @@ def query_leads(q:str="",status:str="",temperature:str="",owner_id:int|None=None
         for i in items: i["can_edit"]=False; i["co_owners"]=co.get(i["id"],[])
     return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"facets":facets,"summary":{"hot":temp_counts.get("Hot",0),"warm":temp_counts.get("Warm",0),"cold":temp_counts.get("Cold",0),"overdue_followups":overdue}}
 
+UNASSIGNED_REGION="Unassigned"
+
 @app.get("/api/query/opportunities")
-def query_opportunities(q:str="",status:str="",forecast_category:str="",owner_id:int|None=None,page:int=1,page_size:int=25,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
+def query_opportunities(q:str="",status:str="",forecast_category:str="",owner_id:int|None=None,region:str="",page:int=1,page_size:int=25,u=Depends(require_perm("OPPORTUNITY_VIEW"))):
     page=max(1,page); page_size=min(max(1,page_size),100); owner=users.alias("owner")
-    base=select(opportunities,companies.c.name.label("company_name"),companies.c.vertical,owner.c.name.label("owner_name")).select_from(opportunities.join(companies,companies.c.id==opportunities.c.company_id).join(owner,owner.c.id==opportunities.c.owner_id)).where(opportunity_visibility_condition(u))
+    # Region lives on the lead, not the opportunity, so the board reaches it through the join rather
+    # than storing a second copy that could drift from the prospect's own record.
+    joined=opportunities.join(companies,companies.c.id==opportunities.c.company_id).join(owner,owner.c.id==opportunities.c.owner_id).join(leads,leads.c.id==opportunities.c.lead_id)
+    base=select(opportunities,companies.c.name.label("company_name"),companies.c.vertical,owner.c.name.label("owner_name"),leads.c.region).select_from(joined).where(opportunity_visibility_condition(u))
     common=[]
     if q: common.append(or_(func.lower(opportunities.c.name).like(f"%{q.lower()}%"),func.lower(companies.c.name).like(f"%{q.lower()}%"),func.lower(owner.c.name).like(f"%{q.lower()}%")))
     if status: common.append(opportunities.c.status==status)
     if forecast_category: common.append(opportunities.c.forecast_category==forecast_category)
     if owner_id: common.append(opportunities.c.owner_id==owner_id)
+    # A blank region is a real bucket on the board, so it has to be selectable like any other.
+    if region==UNASSIGNED_REGION: common.append(or_(leads.c.region.is_(None),func.trim(leads.c.region)==""))
+    elif region: common.append(leads.c.region==region)
     if common: base=base.where(*common)
     nrow=row(select(func.count().label("total")).select_from(base.subquery())); n=int((nrow or {}).get("total",0))
     raw=rows(base.order_by(opportunities.c.updated_at.desc()).offset((page-1)*page_size).limit(page_size)); items=[mask_fields(u,"opportunity",x) for x in raw]
-    summary_rows=rows(select(opportunities.c.amount,opportunities.c.final_amount,opportunities.c.currency,opportunities.c.forecast_category,opportunities.c.status,opportunities.c.next_follow_up_date).select_from(opportunities.join(companies,companies.c.id==opportunities.c.company_id).join(owner,owner.c.id==opportunities.c.owner_id)).where(opportunity_visibility_condition(u),*common))
+    summary_rows=rows(select(opportunities.c.amount,opportunities.c.final_amount,opportunities.c.currency,opportunities.c.forecast_category,opportunities.c.status,opportunities.c.next_follow_up_date,leads.c.region).select_from(joined).where(opportunity_visibility_condition(u),*common))
     rates=fx_map(); pipeline=best=commit=0.0; due=active=0
     # Per-stage converted totals over the WHOLE filtered set, so the board's column headers do not
     # have to add raw native amounts from the current page (INR + USD used to be summed as "USD").
-    by_status={}; missing=set(); corp=norm_currency(corporate_currency())
+    # `by_region` repeats that per region for the same reason: a region's column header must not be
+    # the sum of whichever of its deals happened to land on the page being shown.
+    by_status={}; by_region={}; missing=set(); corp=norm_currency(corporate_currency())
     for o in summary_rows:
         st=str(o.get("status") or ""); conv=to_corporate(won_amount(o) if st=="Closed Won" else o.get("amount"),o.get("currency"),rates)
-        g=by_status.setdefault(st,{"count":0,"value":0.0,"unrated":0}); g["count"]+=1
-        if conv is None: missing.add(norm_currency(o.get("currency")) or corp); g["unrated"]+=1
-        else: g["value"]+=conv
+        rg=(str(o.get("region") or "").strip()) or UNASSIGNED_REGION
+        for g in (by_status.setdefault(st,{"count":0,"value":0.0,"unrated":0}),
+                  by_region.setdefault(rg,{}).setdefault(st,{"count":0,"value":0.0,"unrated":0})):
+            g["count"]+=1
+            if conv is None: g["unrated"]+=1
+            else: g["value"]+=conv
+        if conv is None: missing.add(norm_currency(o.get("currency")) or corp)
         if st.startswith("Closed "): continue
         active+=1; val=conv or 0; pipeline+=val
         if o.get("forecast_category")=="Best Case": best+=val
         if o.get("forecast_category")=="Commit": commit+=val
         if o.get("next_follow_up_date") and o["next_follow_up_date"]<=today_str(): due+=1
     for g in by_status.values(): g["value"]=round(g["value"],2)
-    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"currency":corporate_currency(),"missing_fx_rates":sorted(missing),"summary":{"active":active,"pipeline":round(pipeline,2),"best_case":round(best,2),"commit":round(commit,2),"followups_due":due,"by_status":by_status}}
+    for stages in by_region.values():
+        for g in stages.values(): g["value"]=round(g["value"],2)
+    # Every region the caller can see, so the filter offers the same vocabulary whatever is filtered.
+    all_regions=sorted({(str(r["region"] or "").strip() or UNASSIGNED_REGION)
+                        for r in rows(select(leads.c.region).select_from(joined).where(opportunity_visibility_condition(u)).distinct())},
+                       key=lambda x:(x==UNASSIGNED_REGION,x.lower()))
+    return {"items":items,"page":page,"page_size":page_size,"total":n,"pages":(n+page_size-1)//page_size,"currency":corporate_currency(),"missing_fx_rates":sorted(missing),"regions":all_regions,
+        "summary":{"active":active,"pipeline":round(pipeline,2),"best_case":round(best,2),"commit":round(commit,2),"followups_due":due,"by_status":by_status,"by_region":by_region}}
 
 @app.get("/api/integrations/microsoft/status")
 def microsoft_status(u=Depends(current_user)):

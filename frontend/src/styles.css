@@ -334,3 +334,11 @@
 .report-table th{font-size:9px;font-weight:750;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);position:sticky;top:0;background:#fff}
 .report-table td.num,.report-table th.num{text-align:right;font-variant-numeric:tabular-nums}
 .report-table tbody tr:hover{background:#f7fbfd}
+/* The opportunity board is grouped by region: a quiet band names the region, the stage columns sit
+   under it unchanged. The band is sticky so the region stays identifiable while a wide board is
+   scrolled sideways. */
+.pipeline-region{margin-bottom:18px}
+.region-band{display:flex;align-items:baseline;gap:10px;padding:4px 2px 9px;position:sticky;left:0}
+.region-band h3{font-size:12px;letter-spacing:-.01em;margin:0}
+.region-band span{font-size:10px;color:var(--muted)}
+.pipeline-region+.pipeline-region .region-band{border-top:1px solid var(--line);padding-top:14px}
