@@ -14,9 +14,12 @@ const SCOPE_LABEL={all:'All Business',team:'My Team'}
 const projects=n=>`${n} ${n===1?'project':'projects'}`
 
 export default function DashboardPage(){
- const {has,user}=useAuth(); const [data,setData]=useState(null); const [error,setError]=useState(null)
+ const {has,user}=useAuth(); const [data,setData]=useState(null); const [attention,setAttention]=useState(null); const [error,setError]=useState(null)
  const vc=useViewCurrency(data?.currency)
- const load=async()=>{setError(null);try{setData(await api.get('/api/dashboard/analytics'))}catch(e){setError(e)}}
+ // Attention is its own call because it answers a different question from the money panel and must
+ // not hold it up; a failure there leaves the figures on screen rather than blanking the page.
+ const load=async()=>{setError(null);try{setData(await api.get('/api/dashboard/analytics'))}catch(e){setError(e)}
+  try{setAttention(await api.get('/api/dashboard/attention'))}catch{setAttention(null)}}
  useEffect(()=>{load()},[])
  if(!data&&!error)return <Spinner label="Loading won and pipeline by currency"/>
  const corporate=data?.currency||vc.corporate; const currency=vc.view; const cv=vc.convert
@@ -130,6 +133,47 @@ export default function DashboardPage(){
      </footer>
     </>:<Empty title="No projects yet" text="Won and pipeline figures appear here as soon as an opportunity is in your scope."/>}
    </section>
+
+   {/* Three places to go next. Every figure here is the one the panel above already reports, or a
+       count taken over the whole set rather than the capped list, so nothing on this page disagrees
+       with anything else on it. Each row opens the page that owns it, already filtered. */}
+   <div className="dash-next">
+    <section className="panel dash-card">
+     <div className="inline-head"><div><h3>Key highlights</h3><p>The same figures as above, in {currency}.</p></div></div>
+     <ul className="dash-rows">
+      <li><button onClick={()=>navigate('pipeline?status=Closed Won&mode=list')}>
+       <span>Won</span><b>{totalWon==null?'—':money(cv(totalWon),currency,false)}</b><small>{projects(wonCount)}</small></button></li>
+      <li><button onClick={()=>navigate('pipeline')}>
+       <span>In pipeline</span><b>{totalPipeline==null?'—':money(cv(totalPipeline),currency,false)}</b><small>{projects(pipelineCount)}</small></button></li>
+      <li><button onClick={()=>navigate('pipeline?status=Closed Lost&mode=list')}>
+       <span>Lost</span><b>{totalLost==null?'—':money(cv(totalLost),currency,false)}</b><small>{projects(lostCount)}</small></button></li>
+      <li><button onClick={()=>navigate('leadership')}>
+       <span>Win rate</span><b>{winRate==null?'—':`${winRate}%`}</b><small>{wonCount} of {wonCount+lostCount} decided</small></button></li>
+     </ul>
+    </section>
+
+    <section className="panel dash-card">
+     <div className="inline-head"><div><h3>Key supports</h3><p>Work waiting on a person today.</p></div></div>
+     {attention?<ul className="dash-rows">
+      <li><button onClick={()=>navigate('actions')}>
+       <span>Overdue actions</span><b className={attention.counts.overdue_actions?'text-danger':undefined}>{attention.counts.overdue_actions}</b><small>past their due date</small></button></li>
+      <li><button onClick={()=>navigate('pipeline')}>
+       <span>Follow-ups overdue</span><b className={attention.counts.followups_overdue?'text-warning':undefined}>{attention.counts.followups_overdue}</b><small>open deals past follow-up</small></button></li>
+      <li><button onClick={()=>navigate('pipeline')}>
+       <span>Closing within 7 days</span><b>{attention.counts.closing_soon}</b><small>expected close is near</small></button></li>
+     </ul>:<p className="dash-quiet">Attention items are unavailable just now.</p>}
+    </section>
+
+    {has('REPORT_VIEW')&&<section className="panel dash-card">
+     <div className="inline-head"><div><h3>Reports</h3><p>Build a report and take it away as CSV.</p></div></div>
+     <ul className="dash-rows">
+      <li><button onClick={()=>navigate('reports')}><span>Opportunity pipeline</span><b>→</b><small>prospect deals</small></button></li>
+      <li><button onClick={()=>navigate('reports')}><span>Partnership opportunities</span><b>→</b><small>partner deals</small></button></li>
+      <li><button onClick={()=>navigate('reports')}><span>Prospects</span><b>→</b><small>the prospect book</small></button></li>
+      <li><button onClick={()=>navigate('reports')}><span>Partnerships</span><b>→</b><small>the partner book</small></button></li>
+     </ul>
+    </section>}
+   </div>
   </>}
  </>
 }

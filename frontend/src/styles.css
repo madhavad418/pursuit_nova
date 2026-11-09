@@ -371,3 +371,16 @@
 .pipeline-region .deal-card{margin-bottom:0}
 .pipeline-region .column-empty{grid-column:1/-1}
 .region-none{font-size:9px;color:var(--muted);margin:2px 2px 0;padding-top:2px}
+/* Three places to go next, under the money panel. Rows rather than tiles: a row can carry a label,
+   a figure and a word of context without any of them shrinking to fit a square. */
+.dash-next{display:grid;grid-template-columns:repeat(auto-fit,minmax(286px,1fr));gap:12px;margin-top:13px}
+.dash-card{display:grid;align-content:start}
+.dash-rows{list-style:none;margin:0;padding:0;display:grid}
+.dash-rows>li+li{border-top:1px solid #eef4f7}
+.dash-rows button{width:100%;display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:2px 10px;
+  border:0;background:none;text-align:left;padding:9px 2px;cursor:pointer;border-radius:8px}
+.dash-rows button:hover{background:#f6fafc}
+.dash-rows span{font-size:10px;font-weight:650}
+.dash-rows b{font-size:13px;letter-spacing:-.02em;justify-self:end}
+.dash-rows small{grid-column:1/2;font-size:8px;color:var(--muted)}
+.dash-quiet{font-size:9px;color:var(--muted);padding:6px 2px}

@@ -22,7 +22,11 @@ const PIPELINE_EDIT_EMAILS=['chandrika@jsan.local','chandrikabr@jsanconsulting.c
 export default function PipelinePage({route,onToast}){
  const {user}=useAuth()
  const editAllowedHere=PIPELINE_EDIT_EMAILS.includes((user?.email||'').trim().toLowerCase())
- const [mode,setMode]=useState('board'); const [filters,setFilters]=useState({q:'',status:'',forecast_category:'',region:'',page:1}); const [data,setData]=useState(null); const fx=useViewCurrency(data?.currency); const [error,setError]=useState(null); const [detail,setDetail]=useState(null); const [edit,setEdit]=useState(false); const [form,setForm]=useState({}); const [saved,setSaved]=useState([]); const [saveOpen,setSaveOpen]=useState(false); const [viewName,setViewName]=useState('')
+ // Opened from a dashboard tile, the board should land on what was clicked rather than on
+ // everything. Read once, from the hash that opened the page: `?status=Closed%20Won&mode=list`.
+ const q0=route?.query
+ const [mode,setMode]=useState(q0?.get('mode')==='list'?'list':'board')
+ const [filters,setFilters]=useState({q:'',status:q0?.get('status')||'',forecast_category:q0?.get('forecast_category')||'',region:q0?.get('region')||'',page:1}); const [data,setData]=useState(null); const fx=useViewCurrency(data?.currency); const [error,setError]=useState(null); const [detail,setDetail]=useState(null); const [edit,setEdit]=useState(false); const [form,setForm]=useState({}); const [saved,setSaved]=useState([]); const [saveOpen,setSaveOpen]=useState(false); const [viewName,setViewName]=useState('')
  const qs=useMemo(()=>{const p=new URLSearchParams({page:String(filters.page),page_size:mode==='board'?'100':'20'});Object.entries(filters).forEach(([k,v])=>k!=='page'&&v&&p.set(k,v));return p.toString()},[filters,mode])
  // Each filter change fires its own request, and they can come back out of order: changing the
  // stage twice quickly left the board showing the FIRST filter's deals under the second filter's

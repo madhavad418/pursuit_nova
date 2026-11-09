@@ -1942,20 +1942,34 @@ def pipeline(u=Depends(current_user)):
         g=groups.setdefault(o["status"],{"status":o["status"],"count":0,"value":0,"currency":corp}); g["count"]+=1; g["value"]+=to_corporate(o.get("amount"),o.get("currency"),rates) or 0
     return list(groups.values())
 
+ATTENTION_LIMIT=40
+
 @app.get("/api/dashboard/attention")
 def attention(u=Depends(current_user)):
-    items=[]; t=date.today()
+    """Work that needs a person: overdue actions, overdue follow-ups, closures inside a week.
+
+    The list is capped, so the counts are taken from the whole set before capping. A dashboard tile
+    reading "showing 40" when there are 60 is worse than no tile — it is the figure someone plans
+    their day on, and a silently truncated one is simply wrong.
+    """
+    items=[]; t=date.today(); counts={"overdue_actions":0,"followups_overdue":0,"closing_soon":0}
     for a in list_actions("all",u):
-        if a.get("overdue"): items.append({"kind":"Overdue Action","company":a["company_name"],"subject":a["description"],"owner":a["assigned_to_name"],"date":a["due_date"],"severity":"Critical"})
+        if a.get("overdue"):
+            counts["overdue_actions"]+=1
+            items.append({"kind":"Overdue Action","company":a["company_name"],"subject":a["description"],"owner":a["assigned_to_name"],"date":a["due_date"],"severity":"Critical"})
     for o in opportunity_rows(u):
         if o["status"].startswith("Closed "): continue
-        if o.get("next_follow_up_date") and o["next_follow_up_date"]<today_str(): items.append({"kind":"Follow-up Overdue","company":o["company_name"],"subject":o["name"],"owner":o["owner_name"],"date":o["next_follow_up_date"],"severity":"High"})
+        if o.get("next_follow_up_date") and o["next_follow_up_date"]<today_str():
+            counts["followups_overdue"]+=1
+            items.append({"kind":"Follow-up Overdue","company":o["company_name"],"subject":o["name"],"owner":o["owner_name"],"date":o["next_follow_up_date"],"severity":"High"})
         if o.get("expected_close_date"):
             try:
                 days=(date.fromisoformat(o["expected_close_date"])-t).days
-                if 0<=days<=7: items.append({"kind":"Closure Approaching","company":o["company_name"],"subject":o["name"],"owner":o["owner_name"],"date":o["expected_close_date"],"severity":"High"})
+                if 0<=days<=7:
+                    counts["closing_soon"]+=1
+                    items.append({"kind":"Closure Approaching","company":o["company_name"],"subject":o["name"],"owner":o["owner_name"],"date":o["expected_close_date"],"severity":"High"})
             except: pass
-    return items[:40]
+    return {"items":items[:ATTENTION_LIMIT],"total":len(items),"shown":min(len(items),ATTENTION_LIMIT),"counts":counts}
 
 
 @app.get("/api/dashboard/analytics")
