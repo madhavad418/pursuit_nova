@@ -342,3 +342,14 @@
 .region-band h3{font-size:12px;letter-spacing:-.01em;margin:0}
 .region-band span{font-size:10px;color:var(--muted)}
 .pipeline-region+.pipeline-region .region-band{border-top:1px solid var(--line);padding-top:14px}
+/* The stage sits at the foot of the deal card, under a hairline, rather than at the top next to the
+   company. At the top it competed with the company name for the first glance and — in a column
+   already headed by that stage — read as the card's title. At the foot it answers "what stage is
+   this, really" on the one card you are looking at, with the forecast category beside it. */
+.deal-stage{display:flex;align-items:center;justify-content:space-between;gap:7px;margin-top:9px;padding-top:8px;border-top:1px solid #eef4f7}
+.deal-stage span{font-size:8px;color:var(--muted)}
+/* Stacked regions change what a sensible column height is. A single board could afford 470px of
+   empty column as a drop target; seven of those per region, down several regions, is a page of
+   mostly nothing. Inside a region the column starts short and grows with its cards. */
+.pipeline-region .pipeline-column{min-height:132px}
+.pipeline-region .column-empty{padding:16px 0}
