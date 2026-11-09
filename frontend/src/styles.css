@@ -357,5 +357,13 @@
    seven fixed tracks — two columns stretched across seven of them looked nothing like the board
    beside it. Columns keep a steady width whatever the region holds, left-aligned, and scroll
    sideways when a region genuinely has many stages in play. */
-.pipeline-region .pipeline-board{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:minmax(238px,296px);justify-content:start}
+/* Stages stack down the page inside a region, one full-width band each, in the order a deal moves
+   through them. The cards then flow ACROSS inside their stage and wrap, so a stage with three deals
+   is one short row rather than three full-width blocks — stacking the stages should not make the
+   page taller than the seven-column board it replaced. */
+.pipeline-region .pipeline-board{display:grid;grid-template-columns:1fr;grid-auto-flow:row;gap:8px;overflow-x:visible}
+.pipeline-region .pipeline-column{min-height:0}
+.pipeline-region .pipeline-column>div{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:7px;align-items:start}
+.pipeline-region .deal-card{margin-bottom:0}
+.pipeline-region .column-empty{grid-column:1/-1}
 .region-none{font-size:9px;color:var(--muted);margin:2px 2px 0;padding-top:2px}
