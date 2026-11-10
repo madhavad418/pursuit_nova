@@ -141,12 +141,12 @@ export default function DashboardPage(){
     <section className="panel dash-card">
      <div className="inline-head"><div><h3>Key highlights</h3><p>The same figures as above, in {currency}.</p></div></div>
      <ul className="dash-rows">
-      <li><button onClick={()=>navigate('pipeline?status=Closed Won&mode=list')}>
-       <span>Won</span><b className="val-won">{totalWon==null?'—':money(cv(totalWon),currency,false)}</b><small>{projects(wonCount)}</small></button></li>
+      <li className="tone-won"><button onClick={()=>navigate('pipeline?status=Closed Won&mode=list')}>
+       <span>Won</span><b>{totalWon==null?'—':money(cv(totalWon),currency,false)}</b><small>{projects(wonCount)}</small></button></li>
       <li><button onClick={()=>navigate('pipeline')}>
        <span>In pipeline</span><b>{totalPipeline==null?'—':money(cv(totalPipeline),currency,false)}</b><small>{projects(pipelineCount)}</small></button></li>
-      <li><button onClick={()=>navigate('pipeline?status=Closed Lost&mode=list')}>
-       <span>Lost</span><b className="val-lost">{totalLost==null?'—':money(cv(totalLost),currency,false)}</b><small>{projects(lostCount)}</small></button></li>
+      <li className="tone-lost"><button onClick={()=>navigate('pipeline?status=Closed Lost&mode=list')}>
+       <span>Lost</span><b>{totalLost==null?'—':money(cv(totalLost),currency,false)}</b><small>{projects(lostCount)}</small></button></li>
       <li><button onClick={()=>navigate('leadership')}>
        <span>Win rate</span><b>{winRate==null?'—':`${winRate}%`}</b><small>{wonCount} of {wonCount+lostCount} decided</small></button></li>
      </ul>
@@ -155,10 +155,10 @@ export default function DashboardPage(){
     <section className="panel dash-card">
      <div className="inline-head"><div><h3>Key supports</h3><p>Work waiting on a person today.</p></div></div>
      {attention?<ul className="dash-rows">
-      <li><button onClick={()=>navigate('actions')}>
-       <span>Overdue actions</span><b className={attention.counts.overdue_actions?'text-danger':undefined}>{attention.counts.overdue_actions}</b><small>past their due date</small></button></li>
-      <li><button onClick={()=>navigate('pipeline')}>
-       <span>Follow-ups overdue</span><b className={attention.counts.followups_overdue?'text-warning':undefined}>{attention.counts.followups_overdue}</b><small>open deals past follow-up</small></button></li>
+      <li className={attention.counts.overdue_actions?'tone-alert':undefined}><button onClick={()=>navigate('actions')}>
+       <span>Overdue actions</span><b>{attention.counts.overdue_actions}</b><small>past their due date</small></button></li>
+      <li className={attention.counts.followups_overdue?'tone-watch':undefined}><button onClick={()=>navigate('pipeline')}>
+       <span>Follow-ups overdue</span><b>{attention.counts.followups_overdue}</b><small>open deals past follow-up</small></button></li>
       <li><button onClick={()=>navigate('pipeline')}>
        <span>Closing within 7 days</span><b>{attention.counts.closing_soon}</b><small>expected close is near</small></button></li>
      </ul>:<p className="dash-quiet">Attention items are unavailable just now.</p>}

@@ -405,5 +405,14 @@
    lost in muted. Borrowed rather than re-chosen, so a figure means the same thing wherever it
    appears on the page. Overdue actions and follow-ups keep the app's own red and amber, and a
    count of zero stays neutral — an empty day should read calm, not alarming. */
-.dash-rows b.val-won{color:var(--green)}
-.dash-rows b.val-lost{color:var(--muted)}
+/* The tone sits on the row, so the name takes it as well as the figure — a row reads as one thing
+   rather than a black label beside a coloured number. The caption underneath stays muted either
+   way: it is context, not the fact being reported. */
+.dash-rows .tone-won span,.dash-rows .tone-won b{color:var(--green)}
+.dash-rows .tone-lost span,.dash-rows .tone-lost b{color:var(--muted)}
+.dash-rows .tone-alert span,.dash-rows .tone-alert b{color:var(--red)}
+/* #d97706, not var(--amber): this stylesheet carries two ambers. The token is #d88b16, but
+   `.text-warning` is redeclared later as #d97706 and that is what every other warning in the app
+   actually renders — the pipeline's "Follow-ups due" among them. Matching the one people already
+   see for this meaning matters more than matching the token it drifted from. */
+.dash-rows .tone-watch span,.dash-rows .tone-watch b{color:#d97706}
