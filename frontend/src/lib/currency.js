@@ -73,3 +73,20 @@ export function ratesAreStale(fetchedAt, now = Date.now(), ttlMs = RATES_TTL_MS)
   // rather than as "fetched in the future", which would pin the table until the clock caught up.
   return age < 0 || age >= ttlMs
 }
+
+/**
+ * What a deal is worth on screen: a closed-won deal is worth what it CLOSED at, not what it was
+ * quoted at.
+ *
+ * The server has always totalled won business this way (`won_amount`), so a deal booked at 97 and
+ * closed at 91 counted as 91 on the dashboard while its own card still read 97 — two numbers for
+ * one deal, and the card was the one people trusted because it sat next to the name.
+ *
+ * `!= null` rather than a truthiness test, so a deal genuinely closed at zero reports zero instead
+ * of falling back to its pre-close amount. A role that may not view `final_amount` sees it masked
+ * to null and falls back to the amount, which is the same thing that role has always seen.
+ */
+export function dealValue(o) {
+  if (String(o?.status || '') === 'Closed Won' && o?.final_amount != null) return Number(o.final_amount)
+  return Number(o?.amount || 0)
+}

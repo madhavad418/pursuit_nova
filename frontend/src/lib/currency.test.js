@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { RATES_TTL_MS, convertBetween, convertFromCorporate, ratesAreStale, viewableCurrencies } from './currency.js'
+import { RATES_TTL_MS, convertBetween, convertFromCorporate, dealValue, ratesAreStale, viewableCurrencies } from './currency.js'
 
 // Live rates on 2026-10-07: one unit of each in USD.
 const RATES = { USD: 1, INR: 0.01036624, GBP: 1.32625995, EUR: 1.12523911, AED: 0.27229408 }
@@ -119,4 +119,33 @@ test('a clock that moved backwards reads as stale, not as fetched in the future'
   // clock caught up — potentially hours of converting at a superseded rate.
   const now = 1_800_000_000_000
   assert.equal(ratesAreStale(now + 60 * 60 * 1000, now), true)
+})
+
+// ------------------------------------------- a won deal is worth what it closed at, not what it was quoted at
+
+test('a closed-won deal reports its final amount', () => {
+  // The reported case: booked at 97, closed at 91. The dashboard said 91, the card said 97.
+  assert.equal(dealValue({ status: 'Closed Won', amount: 97, final_amount: 91 }), 91)
+})
+
+test('a closed-won deal with no final amount falls back to the amount', () => {
+  assert.equal(dealValue({ status: 'Closed Won', amount: 97, final_amount: null }), 97)
+  assert.equal(dealValue({ status: 'Closed Won', amount: 97 }), 97)
+})
+
+test('a deal genuinely closed at zero reports zero, not its pre-close amount', () => {
+  assert.equal(dealValue({ status: 'Closed Won', amount: 500000, final_amount: 0 }), 0)
+})
+
+test('any other stage reports the amount, final or not', () => {
+  // Only a win is restated: a lost or held deal is still carrying the value it was in play for.
+  assert.equal(dealValue({ status: 'Qualified', amount: 97, final_amount: 91 }), 97)
+  assert.equal(dealValue({ status: 'Closed Lost', amount: 97, final_amount: 91 }), 97)
+  assert.equal(dealValue({ status: 'Closed Hold', amount: 97 }), 97)
+})
+
+test('a missing or empty deal is zero, not NaN', () => {
+  assert.equal(dealValue({}), 0)
+  assert.equal(dealValue(null), 0)
+  assert.equal(dealValue({ status: 'Qualified', amount: null }), 0)
 })
